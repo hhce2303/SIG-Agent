@@ -9,3 +9,5 @@ apps/voice-agent/src/server.crt
 apps/voice-agent/src/server.key
 apps/voice-agent/src/sessions.db
 .pytest_cache/
+__pycache__/
+*.pyc
