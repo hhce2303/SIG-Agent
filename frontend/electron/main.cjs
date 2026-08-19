@@ -26,6 +26,19 @@ function createWindow() {
   }
 }
 
+// Fase 2 (cierre del gap de Fase 1): el servidor real corre WSS/TLS con un certificado
+// autofirmado por defecto (NFR-05, `server/tls.py`) — sin esto, Electron rechaza tanto la
+// conexión WebSocket como el login por REST contra ese certificado, y el login nunca funciona
+// contra el backend real. Esto confía en CUALQUIER certificado inválido para toda la app, lo
+// cual es aceptable para el modelo de despliegue actual (LAN interna de un solo concesionario,
+// ADR-0004) pero es una concesión de seguridad real, no cosmética — el endurecimiento correcto
+// es fijar (pin) el fingerprint del certificado específico del servidor configurado en vez de
+// aceptar cualquiera; queda pendiente como mejora, no como parte de este alcance.
+app.on('certificate-error', (event, _webContents, _url, _error, _certificate, callback) => {
+  event.preventDefault()
+  callback(true)
+})
+
 app.whenReady().then(() => {
   createWindow()
   app.on('activate', () => {

@@ -1,4 +1,4 @@
-import { AlertTriangle, Headphones, LogIn } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Headphones, LogIn } from 'lucide-react'
 import { FormEvent, useState } from 'react'
 import { useEngineStore } from '../stores/engineStore'
 
@@ -6,12 +6,15 @@ import { useEngineStore } from '../stores/engineStore'
 // exige un token de sesión (ADR-0008/NFR-04) que solo `POST /auth/login` puede emitir. `App.tsx`
 // muestra esta pantalla en vez de las rutas normales mientras no haya `authToken`.
 export default function LoginPage() {
-  const { userName, authError, authenticating, bridgeUrl, login } = useEngineStore()
+  const { userName, authError, authenticating, bridgeUrl, login, updateSettings } = useEngineStore()
   const [supervisorId, setSupervisorId] = useState(userName)
   const [passphrase, setPassphrase] = useState('')
+  const [url, setUrl] = useState(bridgeUrl)
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    if (url.trim() !== bridgeUrl) updateSettings(url.trim(), supervisorId.trim())
     login(supervisorId.trim(), passphrase)
   }
 
@@ -36,7 +39,16 @@ export default function LoginPage() {
         <button className="blue-button login-submit" type="submit" disabled={authenticating}>
           <LogIn size={17} />{authenticating ? 'Signing in…' : 'Sign in'}
         </button>
-        <p className="form-help">Connecting to {bridgeUrl} — change this in Settings after signing in.</p>
+
+        <button type="button" className="text-link login-advanced-toggle" onClick={() => setShowAdvanced((value) => !value)}>
+          <ChevronDown size={14} style={{ transform: showAdvanced ? 'rotate(180deg)' : undefined }} />Advanced
+        </button>
+        {showAdvanced && (
+          <label>
+            <span>Backend URL</span>
+            <input value={url} onChange={(event) => setUrl(event.target.value)} pattern="wss?://.*" />
+          </label>
+        )}
       </form>
     </div>
   )

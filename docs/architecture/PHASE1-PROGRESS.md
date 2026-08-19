@@ -7,7 +7,9 @@ decisiones pendientes) — este archivo dice, para cada ítem de Fase 1, si hoy 
 `IN PROGRESS`, o `BLOCKED` (y por qué), con la evidencia (archivo/ADR/test) que lo respalda. Se
 actualiza en cada sesión de trabajo sobre Fase 1, no se reescribe desde cero.
 
-**Última actualización:** 2026-08-19.
+**Última actualización:** 2026-08-19 (sesión 5 — cierre del gap técnico durante la
+implementación de [Fase 2](../designs/roadmap-3-fases.md#fase-2--los-dominios-de-producto-completos-escenarios-métricas-historial),
+ver [PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md)).
 
 ## Hito de cierre de Fase 1 (roadmap)
 
@@ -15,11 +17,14 @@ actualiza en cada sesión de trabajo sobre Fase 1, no se reescribe desde cero.
 > configurable (sin editor de UI todavía), con manejo de error real, y la sesión queda
 > registrada — sin puntaje/ponderado todavía.
 
-**Estado global: BLOCKED.** No solo por trabajo técnico pendiente (backend async, VAD, cliente
-Electron, persistencia — todo abajo) sino por bloqueantes organizacionales que ningún cambio de
-código puede resolver por sí solo — ver la sección "Bloqueantes organizacionales" al final. El
-gate de Fase 0 (spike de validación) tampoco está confirmado como corrido — ver
-[TODO-08](./TODOS.md#todo-08).
+**Estado técnico: DONE** (ver sesión 5 abajo) — el frontend Electron existe y el servidor real
+invoca STT/Claude/TTS de verdad sobre el protocolo que ese frontend ya esperaba (antes solo
+sincronizaba eventos de la máquina de estados de turno). **El hito de fase completo sigue sin
+poder declararse cerrado en sentido estricto** porque depende también de bloqueantes
+organizacionales que ningún cambio de código resuelve por sí solo — ver "Bloqueantes
+organizacionales" al final. TODO-04 (retención/visibilidad) se resolvió a medias en la sesión 5
+(visibilidad sí, retención no); el resto (TODO-03/05/06/07/08) sigue sin evidencia de estar
+resuelto.
 
 ## Backend / arquitectura
 
@@ -27,25 +32,32 @@ gate de Fase 0 (spike de validación) tampoco está confirmado como corrido — 
 |---|---|---|
 | Harness de tests real ANTES de tocar el rewrite | **DONE** (nivel prototipo) | pytest en `apps/voice-agent/pytest.ini` + `src/test_*.py` (34 tests): unitarios con I/O mockeado para STT/TTS/LLM/micrófono/persistencia/auth/state machine, integración con stub de Claude, test de caos con error de Claude inyectado a mitad de turno. Incluye el fix del bug de `test_microphone.py` (`duration` no existía en `MicrophoneRecorder.record()` — ahora sí, ver `audio/microphone.py`). |
 | Puertos/adaptadores formalizados (base para el rewrite) | **DONE** | `core/ports.py` (ADR-0006) — `MicrophonePort`, `SpeechToTextPort`, `TextToSpeechPort`, `DispatcherPort`, `PersistencePort`, `SessionTokenPort`, `DispatcherError`, `InvalidSessionTokenError`. `core/conversation.py` ya solo importa puertos, no adaptadores concretos. |
-| Manejo de error de Claude API como estado de primera clase | **IN PROGRESS** (versión mínima) | `llm/claude.py`: reintento acotado ante errores transitorios (`APIConnectionError`, `APITimeoutError`, `RateLimitError`, `InternalServerError`, `OverloadedError`), `DispatcherError` si se agotan. `core/conversation.py`: recuperación en el propio diálogo (`DISPATCHER_RECOVERY_LINE`). **Falta:** timeout configurable explícito (hoy depende del timeout default del SDK de Anthropic), y esto todavía corre en el prototipo CLI síncrono, no en el servidor async real. |
-| Motor de persistencia — "la sesión queda registrada" | **DONE** (a nivel servidor de eventos de turno) | `persistence/sqlite_store.py::SQLiteSessionStore` (ADR-0007) ya lo llama el servidor real: `server/app.py` guarda un `SessionRecord` al desconectar cualquier WebSocket de sesión, en cualquier estado. Probado de punta a punta en `test_server_app.py::test_disconnecting_persists_the_session_record`. **Falta:** hoy graba eventos de turno, no todavía transcripciones/audio de la llamada real (eso llega con el pipeline de audio real, ver abajo). |
+| Manejo de error de Claude API como estado de primera clase | **DONE (sesión 5)** | `llm/claude.py`: reintento acotado ante errores transitorios (`APIConnectionError`, `APITimeoutError`, `RateLimitError`, `InternalServerError`, `OverloadedError`), `DispatcherError` si se agotan. `server/app.py::get_dispatcher_reply` ahora corre esto en el servidor async real (vía `asyncio.to_thread` + `asyncio.wait_for(CLAUDE_TIMEOUT_SECONDS)`) — recuperación en el propio diálogo (`DISPATCHER_RECOVERY_LINE`) tanto ante `DispatcherError` como ante timeout, sin tumbar la sesión. Probado en `test_server_app.py::test_dispatcher_error_recovers_in_dialogue_instead_of_dropping_the_call`. |
+| Motor de persistencia — "la sesión queda registrada" | **DONE (sesión 5, con transcript real)** | `persistence/sqlite_store.py::SQLiteSessionStore` (ADR-0007) guarda un `SessionRecord` completo (transcript real, evaluación, outcome) al terminar o desconectar cualquier sesión, en cualquier estado. Probado de punta a punta en `test_server_app.py::test_full_call_flow_produces_a_completed_session_with_evaluation` y `test_disconnecting_mid_call_persists_a_network_drop_outcome_without_scoring`. **Sigue sin guardar audio** — a propósito, ver NFR-07 (cumplimiento regulatorio de grabación, sin resolver) en [PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md). |
 | Auth por sesión (NFR-04) | **DONE** (mecanismo + scope por conexión) | `auth/session_token.py::HmacSessionTokenIssuer` (ADR-0008) + `server/app.py`: `POST /auth/login` emite el token, el handshake de WebSocket lo valida y rechaza (código WS 1008) tanto un token inválido/expirado como uno que no corresponde al `session_id` de la URL — NFR-04 ("una conexión no puede apuntar a la sesión de otra") probado explícitamente en `test_server_app.py::test_websocket_rejects_token_for_a_different_session`. **Falta:** WSS/TLS (NFR-05, ver fila siguiente) y credenciales reales por supervisor — hoy es una passphrase compartida (`SUPERVISOR_PASSPHRASE`), no una cuenta por persona; ver Options not chosen de ADR-0008 si aparece un SSO real. |
 | State machine de turnos explícito (listening/hablando/procesando/etc.) | **DONE** (dominio) + **conectada al servidor** | `core/turn_state.py::TurnStateMachine`, cableada en `server/app.py` a eventos JSON entrantes por WebSocket (`{"event": "..."}`) con la respuesta de nuevo estado o de error sin cerrar la conexión (NFR-02). Probado en `test_turn_state.py` y `test_server_app.py`. **Falta:** hoy los eventos de turno los dispara quien sea que hable el protocolo WebSocket a mano (o un test) — todavía no hay VAD real disparándolos desde audio de micrófono. |
 | Core async de servidor (FastAPI/WebSocket) | **DONE** (esqueleto: login + handshake + turnos + registro) | `server/app.py::create_app` (factory) + `server_main.py` (entry point real con `uvicorn`). Se agregaron `fastapi`/`uvicorn[standard]` como dependencias (`uv add`, ver `pyproject.toml`/`uv.lock`). 8 tests de integración contra `TestClient` en `test_server_app.py`, sin mocks de bajo nivel — ejercita la app ASGI real. |
-| Pipeline de audio real (VAD → chunks → STT/TTS) sobre la conexión | **NOT STARTED — a propósito** | El servidor de arriba sincroniza *eventos de turno* como JSON, no audio binario. El formato de chunk, dónde vive el VAD, y el tamaño de buffer dependen del resultado del spike de latencia de Gate 0 (TODO-08) — no hay ADR de protocolo de audio todavía, e inventar uno sin ese dato violaría la regla ADR-first de CONTRIBUTING.md. Ver el docstring de `server/app.py` para el razonamiento completo. |
+| Pipeline de audio real (VAD → chunks → STT/TTS) sobre la conexión | **DONE (sesión 5) — sin VAD automático, a propósito** | `server/app.py::session_socket` ahora invoca `MicrophoneRecorder`/`WhisperSTT`/`ClaudeDispatcher`/`KokoroTTS` reales (vía `asyncio.to_thread`) en el flujo `call.start`/`recording.start`/`recording.stop`/`call.end`, hablando el protocolo completo de comandos/eventos que el frontend ya esperaba — no solo sincronizando `TurnState` como antes. El usuario confirmó explícitamente mantener `recording.start`/`recording.stop` como comandos explícitos (push-to-talk) en vez de VAD automático (ADR-0005 sigue sin implementarse) — no se inventó un protocolo de audio binario/streaming; sigue siendo el modelo "backend en la misma máquina que el mic" de `frontend/BACKEND_REQUIREMENTS.md` §2. Ver [PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md). |
 | Confianza de STT por segmento + confirmación de datos críticos (NFR-09) | **DONE** (versión mínima, sin UI) | `stt/whisper.py::WhisperSTT`: segmentos con `avg_logprob` bajo el umbral se marcan inline como `[unclear: ...]` (`test_stt.py`, incluye el fixture de VIN poco claro). `llm/claude.py`: el system prompt instruye al dispatcher a pedir confirmación explícita de un dato crítico marcado así, en vez de aceptarlo en silencio (`test_claude_dispatcher.py::test_respond_system_prompt_instructs_confirming_unclear_critical_data`). **Falta:** esto depende de que el LLM realmente siga la instrucción (no hay garantía dura de modelo) y de que la UI del cliente refleje esa confirmación visualmente — hoy es solo comportamiento de diálogo. |
-| WSS/TLS (NFR-05) | **DONE** (certificado autofirmado, prendido por default) | `server/tls.py::ensure_self_signed_cert` genera cert+key si no existen (idempotente — no se regenera en cada arranque). `server_main.py::build_uvicorn_kwargs` los pasa a `uvicorn.run` por default; `DISABLE_TLS=1` es el escape hatch explícito solo para desarrollo local. Probado en `test_server_tls.py` y `test_server_main.py`. **Falta:** esto es un cert autofirmado — cada máquina de supervisor necesita confiar en él una vez (paso operativo, ver TODO-03), o alguien pone un reverse proxy con un cert real delante. Con esto, el gate de AGENTS.md regla 5 (auth + WSS/TLS) queda técnicamente cumplido — el spike de Gate 0 y el resto de bloqueantes organizacionales siguen sin resolver aparte. |
-| Logging estructurado con correlation id | **IN PROGRESS** | `core/observability.py` (JSON por línea, `log_event` con `correlation_id` explícito) cableado en `server/app.py`: `login_succeeded`/`login_failed`, `session_connected`, `turn_transition`/`turn_transition_rejected`, `session_disconnected` (con `duration_seconds`/`turn_count`). Probado en `test_observability.py` y de punta a punta en `test_server_app.py::test_server_emits_structured_logs_with_session_correlation_id` (mismo `correlation_id` en las 4 etapas). **Falta:** latencia/confianza de STT y latencia de Claude — NFR-08 pide instrumentar esas etapas también, pero el servidor todavía no invoca STT/TTS/Claude (ver fila "Pipeline de audio real"), así que no hay nada real que instrumentar ahí todavía. |
+| WSS/TLS (NFR-05) | **DONE** (certificado autofirmado, prendido por default) | `server/tls.py::ensure_self_signed_cert` genera cert+key si no existen (idempotente — no se regenera en cada arranque). `server_main.py::build_uvicorn_kwargs` los pasa a `uvicorn.run` por default; `DISABLE_TLS=1` es el escape hatch explícito solo para desarrollo local. Probado en `test_server_tls.py` y `test_server_main.py`. **Falta:** esto es un cert autofirmado — cada máquina de supervisor necesita confiar en él una vez (paso operativo, ver TODO-03), o alguien pone un reverse proxy con un cert real delante. (Sesión 5: el cliente Electron ahora confía en cualquier cert inválido vía `certificate-error` para poder hablarle a este cert autofirmado — ver `frontend/electron/main.cjs` y su comentario sobre el trade-off de seguridad; el endurecimiento correcto es fijar el fingerprint específico, no aceptar cualquiera.) |
+| Logging estructurado con correlation id | **DONE (sesión 5)** | `core/observability.py` (JSON por línea, `log_event` con `correlation_id` explícito) cableado en `server/app.py`: `login_succeeded`/`login_failed`, `session_connected`, `turn_transition`/`turn_transition_rejected`, `stt_completed`/`stt_failed` (con `latency_ms` y `low_confidence_segment_count`), `dispatcher_completed`/`dispatcher_error` (con `latency_ms`), `tts_completed`/`tts_failed` (con `latency_ms`), `session_disconnected`. Probado en `test_observability.py` y de punta a punta en `test_server_app.py::test_server_emits_structured_logs_with_session_correlation_id`. NFR-08 queda cubierto: la latencia/confianza de STT y la latencia de Claude/TTS que antes no había nada real que instrumentar, ahora sí. |
 
 ## Frontend (Electron + React + Tailwind)
 
-**NOT STARTED en su totalidad.** No existe todavía ningún proyecto Electron en el repo — hoy
-solo hay un prototipo CLI en Python (`apps/voice-agent/src/main.py`). Esto es la porción más
-grande de trabajo técnico restante de Fase 1: indicador visual de turno con todos sus estados,
-estado de conexión/reconexión, control de pausa/abortar, transición de decompresión, mecanismo
-de escenario intercambiable (sin editor todavía). El prototipo CLI actual sigue funcionando como
-fallback manual (NFR-03) — no se tocó su comportamiento por defecto, solo se le agregaron
-puertos y manejo de error por debajo.
+**DONE (sesión 5, cierra Fase 1 + integra Fase 2)** — existe un proyecto Electron+React+Zustand
+completo en `frontend/` (sin Tailwind real pese al nombre del ADR-0002 — es CSS a mano en
+`src/styles/globals.css`, decisión previa a esta sesión, no se introdujo Tailwind de forma no
+solicitada). Cubre: indicador visual de turno con sus estados (`CallPage.tsx` — conectando/
+chequeo de mic, procesando, hablando, pausado, corte de conexión), estado de conexión/
+reconexión (`voiceBridge.ts` con reconexión automática), control de pausa/abortar, transición de
+decompresión (pantalla de resultado con `SessionBreakdown`, no un corte instantáneo), y
+mecanismo de escenario intercambiable con biblioteca completa (ya con editor CRUD, ver
+[PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md) — el roadmap solo pedía "sin editor" para el cierre
+de Fase 1, el editor llegó junto con Fase 2 en la misma sesión). El prototipo CLI actual sigue
+funcionando como fallback manual (NFR-03) — no se tocó su comportamiento por defecto.
+**Falta que no bloquea el hito:** el login del frontend (`LoginPage.tsx`) es nuevo y no tiene
+todavía un test automatizado (no existe framework de test de frontend en el repo, ver
+[PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md) para ese gap conocido).
 
 ## Bloqueantes organizacionales (ningún cambio de código los resuelve)
 
@@ -53,7 +65,8 @@ Ver [TODOS.md](./TODOS.md) para el detalle completo. Sin resolver a la fecha de 
 actualización:
 
 - **TODO-03** — dueño operativo de la caja RTX. Sin nombre.
-- **TODO-04** — política de retención/visibilidad del historial. Sin resolver.
+- **TODO-04** — política de retención/visibilidad del historial. **Visibilidad resuelta**
+  (self-only, sesión 5) — **retención sigue sin resolver.**
 - **TODO-05** — cumplimiento regulatorio de grabación de voz. Sin confirmar.
 - **TODO-06** — segundo ingeniero/revisor nombrado. Sin nombre.
 - **TODO-07** — presupuesto de capital para la GPU RTX. Sin confirmar.
@@ -67,19 +80,22 @@ sigan `PENDING`.
 
 ## Próxima sesión de trabajo (sugerido, no comprometido)
 
-1. Decidir dónde empieza el proyecto Electron+React+Tailwind (repo nuevo dentro de `apps/`,
-   estructura de carpetas, gestor de paquetes) — todavía no existe ni un scaffold, y es la
-   porción más grande de trabajo técnico que queda en Fase 1. Requiere decisiones de tooling
-   (npm/pnpm, Vite, TypeScript o no) que no están fijadas en ningún ADR todavía — candidato a
-   confirmar con el usuario antes de generar la estructura, no a asumir en silencio.
-2. Confirmar si el spike de Gate 0 (TODO-08) ya corrió fuera de este repo o sigue pendiente —
-   condiciona si el protocolo de audio real (chunk size, punto de VAD) se puede empezar a
-   diseñar, y si ADR-0004 (servidor LAN) sigue siendo la base correcta.
-3. Timeout configurable explícito en `ClaudeDispatcher` (hoy depende del default del SDK) —
-   cierra del todo la fila "Manejo de error de Claude API" de la tabla de arriba.
-4. Cuando exista el pipeline de audio real: extender `log_event` a STT/Claude/TTS (latencia,
-   confianza por segmento) — `core/observability.py` ya está listo para eso, solo falta algo
-   real que instrumentar.
+**Nota (sesión 5):** los 4 ítems que este documento sugería antes de la sesión 5 ya están
+resueltos (frontend existente y ahora cableado al protocolo real, timeout de Claude, logging de
+latencia) — ver [PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md) para el detalle. Lo que queda:
+
+1. Confirmar si el spike de Gate 0 (TODO-08) ya corrió fuera de este repo o sigue pendiente —
+   sigue sin evidencia de haberse corrido. Condiciona si ADR-0004 (servidor LAN) y ADR-0005
+   (VAD sin barge-in, todavía sin implementar de verdad — ver TODO en `core/turn_state.py`)
+   siguen siendo la base correcta.
+2. Instalar el certificado autofirmado en el almacén de confianza real de las máquinas de
+   supervisor (o poner un reverse proxy con cert real) — el cliente Electron hoy confía en
+   cualquier cert como parche temporal (`frontend/electron/main.cjs`), no es la solución final.
+3. Retención (la mitad de TODO-04 que sigue pendiente) — cuánto tiempo se guardan transcripts,
+   mecanismo de purga por antigüedad.
+4. Framework de test de frontend (no existe ninguno hoy) — `LoginPage.tsx`, el editor de
+   escenarios y el historial nuevos no tienen cobertura automatizada todavía, solo verificación
+   manual + `tsc --noEmit`/`vite build` en verde.
 
 ## Historial de sesiones de trabajo
 
@@ -109,3 +125,10 @@ sigan `PENDING`.
   `core/observability.py` (JSON por línea + `log_event` con `correlation_id` explícito),
   cableado en `server/app.py` en las 4 etapas del ciclo de vida de una conexión (login, connect,
   cada turno, disconnect). 54 tests en total, todos verdes. Sin dependencias nuevas.
+- **2026-08-19 (sesión 5, implementación de Fase 2):** cierre del gap técnico real de Fase 1
+  (servidor reescrito para invocar STT/Claude/TTS de verdad y hablar el protocolo completo que
+  el frontend Electron ya esperaba) + los 3 dominios de producto de Fase 2 (escenarios, métricas,
+  historial) + ajustes + pulido del loop en vivo. Ver [PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md)
+  para el detalle completo. 89 tests de backend en total, todos verdes; frontend con
+  `tsc --noEmit` y `vite build` en verde (no hay framework de test de frontend en el repo
+  todavía).

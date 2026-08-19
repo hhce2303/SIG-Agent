@@ -6,8 +6,12 @@ backend. Describe el protocolo que consume la interfaz actual.
 ## 1. Transporte
 
 - WebSocket con mensajes JSON codificados en UTF-8.
-- Desarrollo local predeterminado: `ws://127.0.0.1:8765`.
+- Desarrollo local predeterminado: `wss://127.0.0.1:8000` (Fase 2: corregido — el servidor real
+  usa WSS/TLS por defecto, NFR-05, y escucha en el puerto 8000, no 8765).
 - Producción remota: `wss://` obligatorio.
+- El WebSocket real vive en `/ws/session/{session_id}?token=...` — el `session_id` y el `token`
+  salen de `POST /auth/login` (ver §10). Sin login previo, el servidor rechaza la conexión
+  (NFR-04) — el cliente debe autenticarse antes de intentar conectar el WebSocket.
 - Un objeto JSON completo por frame de texto.
 - Tamaño máximo recomendado por mensaje: 1 MiB.
 - El backend debe aceptar reconexiones y tratar cada conexión como una sesión
@@ -268,7 +272,31 @@ Requisitos:
   historial.
 - No enviar rutas locales, stack traces ni contenido de variables de entorno.
 
-## 9. Criterios de aceptación
+## 9. Login y REST (Fase 2)
+
+Además del WebSocket, el backend expone REST para autenticación y los 2 dominios que no son
+tiempo real (escenarios, ajustes). El historial y la lista de escenarios para el picker de la
+llamada siguen siendo los comandos WS existentes (`scenarios.list`/`history.list`) — REST solo
+cubre login y mutaciones (crear/editar/borrar).
+
+```
+POST /auth/login   { supervisor_id, passphrase } → { session_id, token }
+GET    /scenarios              (Authorization: Bearer <token>)
+GET    /scenarios/{id}
+POST   /scenarios              { title, category, difficulty, language, description, briefing,
+                                  critical_data_points: [{ key, label, required }] }
+PUT    /scenarios/{id}         (mismo body que POST)
+DELETE /scenarios/{id}
+GET    /settings                → { tts_voice }
+PUT    /settings                { tts_voice }
+```
+
+Todos los endpoints salvo `/health` y `/auth/login` requieren `Authorization: Bearer <token>`
+con el token emitido por `/auth/login`. El historial (`history.data`) siempre se escopea
+server-side por el `supervisor_id` del token verificado — nunca por un id que mande el cliente
+(visibilidad self-only, NFR-06).
+
+## 10. Criterios de aceptación
 
 - [ ] Conexión y reconexión funcionan sin reiniciar el frontend.
 - [ ] `system.ping`, escenarios e historial responden con los esquemas exactos.

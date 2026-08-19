@@ -30,10 +30,18 @@ real sigue sin dueño y sigue abierta (no bloquea este mecanismo, ver ADR-0008).
 interna) suele estancarse en revisión de seguridad por meses.
 
 ### TODO-04
-**Política de retención y visibilidad del historial.** Estado: PENDING.
+**Política de retención y visibilidad del historial.** Estado: **IN PROGRESS** (mitad resuelta).
 ¿Cuánto tiempo se retienen audio/transcripts? ¿Quién puede ver el historial de quién — el
 propio supervisor, su jefe, RRHH? Ver [NFR-06](./nfr.md#nfr-06). Sin esto, los supervisores no
-practican honestamente.
+practican honestamente. **Actualización 2026-08-19 (Fase 2):** la mitad de **visibilidad** se
+resolvió — el usuario confirmó self-only (el propio supervisor ve su historial completo, jefe/
+RRHH sin acceso directo), implementado en `persistence/sqlite_store.py::list_sessions`
+(escopeado siempre por el `supervisor_id` del token verificado, nunca por lo que mande el
+cliente) y ejercitado en `test_persistence.py::test_list_sessions_scopes_by_supervisor_...`.
+**Sigue pendiente la mitad de retención** — no hay política de cuánto tiempo se guardan
+transcripts (no se captura/guarda audio en ningún punto de esta arquitectura), ni un mecanismo
+de purga por antigüedad — ADR-0007 ya anticipó que el schema debería soportar esto una vez que
+la política exista.
 
 ### TODO-05
 **Cumplimiento regulatorio de grabación de voz.** Estado: PENDING.
@@ -67,15 +75,23 @@ desconocimiento de protocolo? Informa qué debe entrenar realmente el simulador 
 de cerrar el alcance de Fase 1.
 
 ### TODO-10
-**Fórmula de ponderado/score de métricas.** Estado: PENDING.
+**Fórmula de ponderado/score de métricas.** Estado: **[RESOLVED 2026-08-19]**.
 Peso relativo de tiempo-hasta-dato-crítico, completitud, claridad/muletillas, y tiempo total.
-Bloquea el diseño de UI de la pantalla de métricas (Fase 2).
+Resuelto por el usuario: completitud 40% / tiempo-a-dato-crítico 30% / claridad 20% / tiempo
+total 10% — implementado en `core/scoring.py::ScoreWeights` (Fase 2), configurable por env vars
+(`METRICS_WEIGHT_*`) sin tocar código. La heurística de completitud (coincidencia de palabra
+clave contra el transcript) queda documentada en el docstring del módulo como simplificación
+mejorable, no como decisión final de producto — candidato a revisar si en uso real resulta
+demasiado burda.
 
 ### TODO-11
-**Formato del editor de escenarios.** Estado: PENDING.
-Campos estructurados guiados vs. texto libre (tipo el `SCENARIO` string actual). Determina si
-la pantalla es un formulario validado o un editor de texto/plantillas — son problemas de UI
-distintos. Bloquea el diseño de UI del editor (Fase 2).
+**Formato del editor de escenarios.** Estado: **[RESOLVED 2026-08-19]**.
+Campos estructurados guiados vs. texto libre (tipo el `SCENARIO` string actual). Resuelto por el
+usuario: campos estructurados (`title`, `category`, `difficulty`, `language`, `description`,
+`critical_data_points`) + una narrativa libre (`briefing`) — implementado en
+`core/ports.py::Scenario`/`ScenarioPort`, `persistence/sqlite_scenario_store.py` (Fase 2). Los
+`critical_data_points` son el puente hacia el motor de métricas (TODO-10) — sin campos
+estructurados, "completitud" no se podría calcular de forma mecánica.
 
 ## Contingencias (se activan solo si su condición ocurre)
 

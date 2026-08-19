@@ -26,17 +26,24 @@ export default function CallPage() {
   }, [lastSession, navigate])
 
   const time = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+  const connecting = callStatus === 'connecting'
   const processing = callStatus === 'processing'
   const paused = callStatus === 'paused'
-  const statusLabel = connection !== 'connected' ? 'Waiting for engine' : processing ? 'Processing speech' : paused ? 'Paused' : callStatus === 'connected' ? 'Connected' : 'Connecting'
+  const statusLabel = connection !== 'connected' ? 'Waiting for engine' : connecting ? 'Connecting…' : processing ? 'Processing speech' : paused ? 'Paused' : callStatus === 'connected' ? 'Connected' : 'Connecting'
   const latestDispatcher = [...transcript].reverse().find((entry) => entry.role === 'dispatcher')?.text
+  // Roadmap Fase 2 (pulido del loop en vivo): una caída de red a mitad de llamada no manda un
+  // `error` event (la conexión ya está muerta) — se detecta por el propio estado de conexión.
+  // La sesión igual queda registrada server-side como `network_drop`, sin puntaje punitivo
+  // (ver `core/scoring.py`); esto solo avisa en vivo que pasó.
+  const connectionLost = connection === 'disconnected' && Boolean(activeScenario) && callStatus !== 'completed'
 
   return (
     <div className="call-screen">
       <Header center={<div className="session-live"><AudioLines size={22} /><strong>{activeScenario?.title ?? 'Training Session'}</strong><i className={`status-dot ${connection === 'connected' ? 'success' : 'warning'}`} /><span>{connection}</span></div>} />
       <main className="call-main">
         <section className="call-card panel">
-          {(error || warning) && <div className={`call-notice ${error ? 'error' : 'warning'}`}><AlertTriangle size={18} /><span>{error ?? warning}</span><button onClick={clearNotice}>×</button></div>}
+          {connectionLost && <div className="call-notice error"><AlertTriangle size={18} /><span>Connection to the server was lost — reconnecting. This session won't be scored.</span></div>}
+          {!connectionLost && (error || warning) && <div className={`call-notice ${error ? 'error' : 'warning'}`}><AlertTriangle size={18} /><span>{error ?? warning}</span><button onClick={clearNotice}>×</button></div>}
           <motion.div className="call-avatar" animate={{ boxShadow: dispatcherSpeaking ? ['0 0 0 0 rgba(45,134,255,.1)','0 0 0 24px rgba(45,134,255,0)','0 0 0 0 rgba(45,134,255,.1)'] : '0 0 0 0 transparent' }} transition={{ duration: 2, repeat: Infinity }}>
             <Headphones size={54} strokeWidth={1.7} />
             <ShieldCheck size={20} className="avatar-badge" />
