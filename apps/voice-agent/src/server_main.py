@@ -12,10 +12,11 @@ Variables de entorno requeridas:
 Opcionales:
 - `SESSIONS_DB_PATH` (default `sessions.db`) — archivo SQLite de ADR-0007.
 - `SERVER_HOST` (default `0.0.0.0`), `SERVER_PORT` (default `8000`).
-
-**No expone WSS/TLS todavía** (NFR-05, ver PHASE1-PROGRESS.md) — no correr esto contra la LAN
-real de un concesionario sin poner TLS delante (ej. un reverse proxy), o auth + token quedan
-viajando en claro.
+- `TLS_CERT_PATH`/`TLS_KEY_PATH` (default `server.crt`/`server.key`) — si no existen, se genera
+  un certificado autofirmado (ver `server/tls.py`). NFR-05 exige WSS/TLS como mínimo de Fase 1,
+  así que TLS está prendido por default, no opt-in.
+- `DISABLE_TLS=1` — **solo para desarrollo local.** Corre en texto plano. Nunca contra la LAN
+  real de un concesionario: auth + token viajarían en claro.
 """
 
 import os
@@ -26,6 +27,7 @@ from dotenv import load_dotenv
 from auth.session_token import HmacSessionTokenIssuer
 from persistence.sqlite_store import SQLiteSessionStore
 from server.app import create_app
+from server.tls import ensure_self_signed_cert
 
 load_dotenv()
 
@@ -46,12 +48,34 @@ def build_app():
     )
 
 
+def build_uvicorn_kwargs() -> dict:
+    """Configuración de `uvicorn.run` — función pura (lee env, no llama a `uvicorn.run` en sí)
+    para poder probar la decisión de TLS sin levantar un servidor real."""
+
+    kwargs = {
+        "host": os.getenv("SERVER_HOST", "0.0.0.0"),
+        "port": int(os.getenv("SERVER_PORT", "8000")),
+    }
+
+    if os.getenv("DISABLE_TLS") == "1":
+        print(
+            "⚠️  DISABLE_TLS=1 — corriendo sin WSS/TLS (viola NFR-05). "
+            "Solo válido para desarrollo local, nunca contra la LAN real."
+        )
+        return kwargs
+
+    cert_path, key_path = ensure_self_signed_cert(
+        os.getenv("TLS_CERT_PATH", "server.crt"),
+        os.getenv("TLS_KEY_PATH", "server.key"),
+    )
+    kwargs["ssl_certfile"] = cert_path
+    kwargs["ssl_keyfile"] = key_path
+
+    return kwargs
+
+
 app = build_app()
 
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host=os.getenv("SERVER_HOST", "0.0.0.0"),
-        port=int(os.getenv("SERVER_PORT", "8000")),
-    )
+    uvicorn.run(app, **build_uvicorn_kwargs())
