@@ -6,6 +6,7 @@ import ReviewPage from './pages/ReviewPage'
 import PerformancePage from './pages/PerformancePage'
 import ScenariosPage from './pages/ScenariosPage'
 import ScenarioEditorPage from './pages/ScenarioEditorPage'
+import ImpactPage from './pages/ImpactPage'
 import ResourcesPage from './pages/ResourcesPage'
 import SettingsPage from './pages/SettingsPage'
 import LoginPage from './pages/LoginPage'
@@ -30,6 +31,7 @@ export default function App() {
       <Route path="/scenarios" element={<ScenariosPage />} />
       <Route path="/scenarios/new" element={<ScenarioEditorPage />} />
       <Route path="/scenarios/:scenarioId/edit" element={<ScenarioEditorPage />} />
+      <Route path="/impact" element={<ImpactPage />} />
       <Route path="/resources" element={<ResourcesPage />} />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />

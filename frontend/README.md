@@ -33,13 +33,30 @@ de guardarse.
 ## Comandos
 
 ```powershell
-npm run dev       # Vite + Electron
-npm run build     # validación TypeScript + bundle web
-npm run dist:win  # instalador de Windows
+npm run dev         # Vite + Electron
+npm run build       # validación TypeScript + bundle web
+npm run dist:win    # instalador de Windows (local, sin publicar)
+npm run release:win # instalador de Windows + publica el release en GitHub (requiere GH_TOKEN)
 ```
 
 `npm run dev` inicia solamente el frontend. El equipo de backend debe ejecutar
 su servicio por separado.
+
+## Auto-update (Fase 3)
+
+El cliente empaquetado (`app.isPackaged`, nunca en `npm run dev`) chequea
+actualizaciones al arrancar y cada 4h contra los Releases de
+`github.com/hhce2303/SIG-Agent` (repo público — los clientes no necesitan
+token para leer). Para publicar una versión nueva:
+
+1. Subir la versión en `package.json`.
+2. Exportar `GH_TOKEN` (un token con permiso de subir assets a Releases —
+   solo en la máquina que empaqueta el release, nunca en un cliente).
+3. `npm run release:win`.
+
+Los clientes ya instalados detectan el release nuevo, lo descargan, y lo
+aplican al reiniciar la app (notificación nativa del sistema operativo, sin
+diálogo custom).
 
 ## Límites de responsabilidad
 

@@ -77,6 +77,41 @@ export type EngineEvent =
   | { event: 'warning'; message: string }
   | { event: 'error'; message: string; recoverable: boolean }
 
+// Fase 3 (roadmap, "cierre del lazo de impacto real"): captura manual de incidentes reales
+// (decisión del usuario — no existe ningún sistema de post-mortems con el que integrar) y el
+// reporte agregado que los correlaciona contra entrenamiento real ya completado.
+export type IncidentInput = {
+  occurred_at: number
+  supervisor_id: string
+  category: string
+  outcome_rating: number
+  critical_data_captured: boolean
+  protocol_followed: boolean
+  notes: string
+}
+
+export type IncidentOutcome = IncidentInput & {
+  id: string
+  reported_by: string
+  promoted_scenario_id: string
+  created_at: number
+}
+
+export type ImpactGroupStats = {
+  sample_size: number
+  avg_outcome_rating: number | null
+  critical_data_capture_rate: number | null
+  protocol_followed_rate: number | null
+}
+
+export type ImpactReport = {
+  trained: ImpactGroupStats
+  untrained: ImpactGroupStats
+  total_incidents: number
+  is_conclusive: boolean
+  caveat: string
+}
+
 export type EngineCommand =
   | { command: 'system.ping' }
   | { command: 'scenarios.list' }

@@ -1,5 +1,32 @@
 const { app, BrowserWindow } = require('electron')
+const { autoUpdater } = require('electron-updater')
 const path = require('path')
+
+// Fase 3 (roadmap): "auto-update del cliente Electron" — sin esto, actualizar cada PC de
+// supervisor requiere ir máquina por máquina en persona. `electron-builder`'s `publish` config
+// (`package.json`) apunta a GitHub Releases del repo real (público, sin token necesario para
+// leer) — quien corta un release corre `npm run release:win` (requiere `GH_TOKEN` con permiso
+// de subir assets, solo en la máquina que empaqueta, nunca en el cliente).
+//
+// `checkForUpdatesAndNotify` usa la notificación nativa del SO cuando ya se descargó una
+// actualización (se aplica al reiniciar la app) — no se construyó un diálogo custom para esto,
+// sería una segunda UI para lo mismo que el SO ya resuelve. Solo corre empaquetado
+// (`app.isPackaged`): en desarrollo (`npm run dev`) no hay artefacto firmado que actualizar, y
+// además fallaría contra el dev server.
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000 // cada 4h — la app corre todo el turno.
+
+function initAutoUpdate() {
+  if (!app.isPackaged) return
+
+  autoUpdater.logger = console
+  autoUpdater.on('error', (error) => console.error('[auto-update] error', error))
+  autoUpdater.on('update-available', (info) => console.log('[auto-update] update available', info.version))
+  autoUpdater.on('update-not-available', () => console.log('[auto-update] already up to date'))
+  autoUpdater.on('update-downloaded', (info) => console.log('[auto-update] downloaded, will install on quit', info.version))
+
+  autoUpdater.checkForUpdatesAndNotify()
+  setInterval(() => autoUpdater.checkForUpdatesAndNotify(), UPDATE_CHECK_INTERVAL_MS)
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -41,6 +68,7 @@ app.on('certificate-error', (event, _webContents, _url, _error, _certificate, ca
 
 app.whenReady().then(() => {
   createWindow()
+  initAutoUpdate()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

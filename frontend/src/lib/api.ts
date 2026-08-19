@@ -2,7 +2,7 @@
 // WebSocket, ver `voiceBridge.ts`); login (ADR-0008) y el CRUD de escenarios/ajustes viven en
 // REST en el backend real, así que esto es nuevo, no una extensión de algo existente.
 
-import type { ScenarioDetail, ScenarioInput } from '../types'
+import type { ImpactReport, IncidentInput, IncidentOutcome, ScenarioDetail, ScenarioInput } from '../types'
 
 export function httpBaseFrom(wsUrl: string): string {
   return wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
@@ -77,4 +77,29 @@ export function updateTtsVoice(httpBase: string, token: string, ttsVoice: string
     { method: 'PUT', body: JSON.stringify({ tts_voice: ttsVoice }) },
     token,
   )
+}
+
+// Fase 3 (roadmap): incidentes reales — captura manual + reporte de impacto agregado.
+export function listIncidents(httpBase: string, token: string) {
+  return request<IncidentOutcome[]>(`${httpBase}/incidents`, {}, token)
+}
+
+export function createIncident(httpBase: string, token: string, incident: IncidentInput) {
+  return request<IncidentOutcome>(
+    `${httpBase}/incidents`,
+    { method: 'POST', body: JSON.stringify(incident) },
+    token,
+  )
+}
+
+export function deleteIncident(httpBase: string, token: string, id: string) {
+  return request<void>(`${httpBase}/incidents/${id}`, { method: 'DELETE' }, token)
+}
+
+export function promoteIncidentToScenario(httpBase: string, token: string, id: string) {
+  return request<ScenarioDetail>(`${httpBase}/incidents/${id}/promote-to-scenario`, { method: 'POST' }, token)
+}
+
+export function getImpactReport(httpBase: string, token: string) {
+  return request<ImpactReport>(`${httpBase}/impact-report`, {}, token)
 }

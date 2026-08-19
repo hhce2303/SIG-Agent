@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from auth.session_token import HmacSessionTokenIssuer
 from core.ports import DispatcherError
+from persistence.sqlite_incident_store import SQLiteIncidentStore
 from persistence.sqlite_scenario_store import SQLiteScenarioStore
 from persistence.sqlite_settings_store import SQLiteSettingsStore
 from persistence.sqlite_store import SQLiteSessionStore
@@ -84,17 +85,19 @@ def app_components(tmp_path):
     session_store = SQLiteSessionStore(str(tmp_path / "sessions.db"))
     scenario_store = SQLiteScenarioStore(str(tmp_path / "scenarios.db"))
     settings_store = SQLiteSettingsStore(str(tmp_path / "settings.db"))
+    incident_store = SQLiteIncidentStore(str(tmp_path / "incidents.db"))
 
-    return token_issuer, session_store, scenario_store, settings_store
+    return token_issuer, session_store, scenario_store, settings_store, incident_store
 
 
 def make_client(app_components, dispatcher=None, stt=None, tts=None, microphone=None):
-    token_issuer, session_store, scenario_store, settings_store = app_components
+    token_issuer, session_store, scenario_store, settings_store, incident_store = app_components
     app = create_app(
         token_issuer=token_issuer,
         session_store=session_store,
         scenario_store=scenario_store,
         settings_store=settings_store,
+        incident_store=incident_store,
         supervisor_passphrase=PASSPHRASE,
         dispatcher=dispatcher or StubDispatcher(["911, what is your emergency?"]),
         stt=stt or StubSTT([""]),
@@ -447,3 +450,122 @@ def test_server_emits_structured_logs_with_session_correlation_id(client, caplog
     assert "latency_ms" in events["dispatcher_completed"]
     assert "latency_ms" in events["tts_completed"]
     assert events["session_disconnected"]["correlation_id"] == session_id
+
+
+# ---------------------------------------------------------------------------
+# Incidentes reales — roadmap Fase 3.
+# ---------------------------------------------------------------------------
+
+
+def _incident_payload(**overrides):
+    payload = {
+        "occurred_at": 500.0,
+        "supervisor_id": "sup-42",
+        "category": "Vehicle Theft",
+        "outcome_rating": 4,
+        "critical_data_captured": True,
+        "protocol_followed": True,
+        "notes": "Handled well, minor delay confirming the plate.",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_incident_crud_round_trip(client):
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    created = client.post("/incidents", json=_incident_payload(), headers=headers)
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+    assert created.json()["reported_by"] == "sup-42"
+    assert created.json()["promoted_scenario_id"] == ""
+
+    listed = client.get("/incidents", headers=headers)
+    assert listed.status_code == 200
+    assert [i["id"] for i in listed.json()] == [incident_id]
+
+    deleted = client.delete(f"/incidents/{incident_id}", headers=headers)
+    assert deleted.status_code == 204
+    assert client.get("/incidents", headers=headers).json() == []
+
+
+def test_promote_incident_creates_a_draft_scenario_from_the_post_mortem(client):
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    incident_id = client.post(
+        "/incidents", json=_incident_payload(notes="Caller was confused about the address."), headers=headers
+    ).json()["id"]
+
+    promoted = client.post(f"/incidents/{incident_id}/promote-to-scenario", headers=headers)
+    assert promoted.status_code == 201
+    scenario = promoted.json()
+    assert scenario["briefing"] == "Caller was confused about the address."
+    assert scenario["critical_data_points"] == []
+
+    incident = client.get("/incidents", headers=headers).json()[0]
+    assert incident["promoted_scenario_id"] == scenario["id"]
+
+    # promover dos veces el mismo incidente sería un duplicado silencioso en la librería.
+    again = client.post(f"/incidents/{incident_id}/promote-to-scenario", headers=headers)
+    assert again.status_code == 409
+
+
+def test_impact_report_is_inconclusive_below_the_minimum_sample_size(client):
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    client.post("/incidents", json=_incident_payload(), headers=headers)
+
+    report = client.get("/impact-report", headers=headers)
+    assert report.status_code == 200
+    body = report.json()
+    assert body["is_conclusive"] is False
+    assert body["total_incidents"] == 1
+    assert body["caveat"] != ""
+
+
+def test_impact_report_correlates_incidents_against_completed_training_sessions(app_components):
+    client = make_client(app_components)
+    token = _login(client, supervisor_id="trained-sup").json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    session_store = app_components[1]
+    for i in range(5):
+        session_store.save_session(
+            _make_completed_session(f"session-{i}", "trained-sup", ended_at=100.0)
+        )
+
+    for i in range(5):
+        client.post(
+            "/incidents",
+            json=_incident_payload(supervisor_id="trained-sup", occurred_at=200.0, outcome_rating=5),
+            headers=headers,
+        )
+    for i in range(5):
+        client.post(
+            "/incidents",
+            json=_incident_payload(supervisor_id="untrained-sup", occurred_at=200.0, outcome_rating=2),
+            headers=headers,
+        )
+
+    body = client.get("/impact-report", headers=headers).json()
+    assert body["is_conclusive"] is True
+    assert body["trained"]["sample_size"] == 5
+    assert body["trained"]["avg_outcome_rating"] == 5.0
+    assert body["untrained"]["sample_size"] == 5
+    assert body["untrained"]["avg_outcome_rating"] == 2.0
+
+
+def _make_completed_session(session_id, supervisor_id, ended_at):
+    from core.ports import SessionRecord
+
+    return SessionRecord(
+        session_id=session_id,
+        supervisor_id=supervisor_id,
+        scenario_name="Vehicle Theft",
+        started_at=ended_at - 60.0,
+        ended_at=ended_at,
+        outcome="ended",
+    )

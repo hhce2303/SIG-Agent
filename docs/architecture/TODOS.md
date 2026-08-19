@@ -23,6 +23,11 @@ servidor según la revisión de ingeniería de `/autoplan`. **Actualización 202
 asumir SSO corporativo) — `accepted` por el usuario. Sigue IN PROGRESS: falta implementar y
 usar el adaptador en el servidor real, y la pregunta de si existe además un SSO corporativo
 real sigue sin dueño y sigue abierta (no bloquea este mecanismo, ver ADR-0008).
+**Actualización 2026-08-19 (sesión de Fase 3):** roadmap Fase 3 pedía "integración de auth con
+SSO corporativo si no se resolvió ya en Fase 1" — no se resolvió, y el usuario confirmó
+explícitamente saltar esto en esta sesión (sin proveedor decidido, sin dueño nombrado, no hay
+base para elegir entre un adaptador OIDC genérico vs. uno específico sin esa decisión). Sigue
+exactamente como estaba: `IN PROGRESS`, sin código nuevo de SSO.
 
 ### TODO-03
 **Dueño operativo de la caja RTX.** Estado: PENDING.
@@ -67,6 +72,10 @@ Confirmar por separado antes de programar el spike de Gate 0.
 Latencia end-to-end (incluyendo round-trip a Claude), prueba de red real con dos máquinas, y
 user-test barato de VAD vs. push-to-talk con 2-3 supervisores. Condiciona directamente
 [ADR-0004](./adr/0004-topologia-de-despliegue.md) y [ADR-0005](./adr/0005-audio-en-vivo-vad-sin-barge-in.md).
+**Nota (Fase 3):** también condiciona directamente "revisitar barge-in/full-duplex" del
+roadmap Fase 3 — sigue sin evidencia de haberse corrido, así que barge-in no se construyó en la
+sesión de Fase 3 (el usuario lo confirmó explícitamente). No es un TODO nuevo porque es
+exactamente la misma condición que ya bloquea ADR-0005.
 
 ### TODO-09
 **Clasificación de causa raíz del incidente documentado.** Estado: PENDING.
@@ -107,10 +116,34 @@ incremental de TTS) como workstream propio de Fase 2, no como nota al pie. Ver
 (contingente a expansión de negocio).
 La topología de servidor LAN + RTX se decidió asumiendo una sola ubicación. Si se agregan
 sitios, replicar servidor + dueño + auth por sitio puede invertir la recomendación hacia el
-ejecutable standalone (Approach A de ADR-0004).
+ejecutable standalone (Approach A de ADR-0004). **Actualización 2026-08-19 (Fase 3):** sigue sin
+evidencia de expansión a más de una ubicación — no revisitado en esta sesión, confirmado
+explícitamente por el usuario.
 
 ### TODO-14
 **Revisitar ADR-0001 si se necesita alta concurrencia.** Estado: PENDING (contingente a cambio
 de escala).
 Python fue elegido asumiendo concurrencia=1 ([NFR-11](./nfr.md#nfr-11)). Si el proyecto
 creciera a necesitar servir muchas sesiones simultáneas, esta decisión debería revisitarse.
+
+### TODO-15
+**Híbrido local + fallback LAN (Approach C de ADR-0004).** Estado: PENDING (contingente a
+entrenamiento remoto/WFH real). Roadmap Fase 3: descartada por ahora, revisitar solo si
+entrenamiento remoto/WFH se vuelve un caso real — no por defecto. **Actualización 2026-08-19:**
+el usuario confirmó explícitamente no construir esto en la sesión de Fase 3 (no hay evidencia
+de un caso real de WFH) — no construido a propósito, mismo tratamiento que TODO-12.
+
+### TODO-16
+**No existe control de acceso por rol (RBAC) en este repo.** Estado: PENDING.
+Toda sesión autenticada tiene el mismo privilegio — no hay distinción entre supervisor/manager/
+RRHH. Esto ya era una brecha implícita en el CRUD de escenarios (Fase 2), pero se vuelve más
+visible en Fase 3: el registro manual de incidentes reales y el reporte de impacto agregado
+(`GET /impact-report`, `POST /incidents`) están pensados conceptualmente para un manager/RRHH,
+pero hoy cualquier supervisor autenticado puede leerlos y escribirlos, igual que ya pasa con el
+editor de escenarios. El reporte de impacto en sí solo expone estadísticas agregadas por grupo
+(nunca supervisor + resultado individual, ver `core/impact_metrics.py`), así que no reabre
+TODO-04 (visibilidad self-only del historial de sesiones) — pero el registro de incidentes
+individual (`GET /incidents`) sí es visible para cualquier sesión autenticada. Si el registro
+manual de incidentes necesita quedar restringido a un rol de manager/RRHH real, eso requiere
+diseñar RBAC primero (quién es "manager"? ¿mismo token, claim nuevo, SSO con roles?) — no se
+inventó unilateralmente en esta sesión.

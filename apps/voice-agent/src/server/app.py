@@ -24,11 +24,14 @@ from pydantic import BaseModel, Field
 from starlette import status
 
 from core.conversation import DISPATCHER_RECOVERY_LINE
+from core.impact_metrics import compute_impact_report
 from core.observability import log_event
 from core.ports import (
     CriticalDataPoint,
     DispatcherError,
     DispatcherPort,
+    IncidentOutcome,
+    IncidentOutcomePort,
     InvalidSessionTokenError,
     MicrophonePort,
     PersistencePort,
@@ -86,11 +89,44 @@ class SettingsModel(BaseModel):
     tts_voice: str
 
 
+class IncidentIn(BaseModel):
+    occurred_at: float
+    supervisor_id: str
+    category: str = ""
+    outcome_rating: int = Field(ge=1, le=5)
+    critical_data_captured: bool
+    protocol_followed: bool
+    notes: str = ""
+
+
+class IncidentOut(IncidentIn):
+    id: str
+    reported_by: str
+    promoted_scenario_id: str
+    created_at: float
+
+
+class GroupStatsModel(BaseModel):
+    sample_size: int
+    avg_outcome_rating: float | None = None
+    critical_data_capture_rate: float | None = None
+    protocol_followed_rate: float | None = None
+
+
+class ImpactReportModel(BaseModel):
+    trained: GroupStatsModel
+    untrained: GroupStatsModel
+    total_incidents: int
+    is_conclusive: bool
+    caveat: str
+
+
 def create_app(
     token_issuer: SessionTokenPort,
     session_store: PersistencePort,
     scenario_store: ScenarioPort,
     settings_store: SettingsPort,
+    incident_store: IncidentOutcomePort,
     supervisor_passphrase: str,
     dispatcher: DispatcherPort,
     stt: SpeechToTextPort,
@@ -183,6 +219,83 @@ def create_app(
     def put_settings(body: SettingsModel, claims: SessionTokenClaims = Depends(_bearer_claims)):
         settings_store.set_tts_voice(body.tts_voice)
         return SettingsModel(tts_voice=settings_store.get_tts_voice())
+
+    # -----------------------------------------------------------------
+    # Incidentes reales — roadmap Fase 3. Ver docstring de `IncidentOutcome` (core/ports.py)
+    # sobre por qué no hay control de acceso por rol (TODO-15): cualquier sesión autenticada
+    # puede registrar/leer/promover, igual que ya pasa con el CRUD de escenarios.
+    # -----------------------------------------------------------------
+
+    @app.get("/incidents", response_model=list[IncidentOut])
+    def list_incidents(claims: SessionTokenClaims = Depends(_bearer_claims)):
+        return [_incident_out(incident) for incident in incident_store.list()]
+
+    @app.post("/incidents", response_model=IncidentOut, status_code=201)
+    def create_incident(body: IncidentIn, claims: SessionTokenClaims = Depends(_bearer_claims)):
+        incident = IncidentOutcome(id="", reported_by=claims.supervisor_id, **body.model_dump())
+        incident_store.create(incident)
+        log_event(
+            logger, "incident_logged", supervisor_id=claims.supervisor_id, incident_id=incident.id
+        )
+        return _incident_out(incident)
+
+    @app.delete("/incidents/{incident_id}", status_code=204)
+    def delete_incident(incident_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
+        incident_store.delete(incident_id)
+        log_event(logger, "incident_deleted", supervisor_id=claims.supervisor_id, incident_id=incident_id)
+
+    @app.post("/incidents/{incident_id}/promote-to-scenario", response_model=ScenarioOut, status_code=201)
+    def promote_incident_to_scenario(
+        incident_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        """Lazo de retroalimentación (roadmap Fase 3): convierte el post-mortem de un incidente
+        real (`notes`) en un borrador de `Scenario` — se crea vacío de `critical_data_points` a
+        propósito, el editor CRUD ya existente (Fase 2) es donde se termina de completar, no se
+        inventa un segundo formulario para lo mismo.
+        """
+
+        incident = incident_store.get(incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail="incident not found")
+        if incident.promoted_scenario_id:
+            raise HTTPException(status_code=409, detail="incident was already promoted to a scenario")
+
+        scenario = Scenario(
+            id="",
+            title=f"Real incident — {incident.category or 'Uncategorized'}",
+            category=incident.category or "Real incident",
+            difficulty="Medium",
+            language="English",
+            description="Drafted from a real incident post-mortem — complete before use.",
+            briefing=incident.notes or "(no post-mortem notes were recorded for this incident)",
+            critical_data_points=[],
+        )
+        scenario_store.create(scenario)
+        incident_store.mark_promoted(incident_id, scenario.id)
+        log_event(
+            logger,
+            "incident_promoted_to_scenario",
+            supervisor_id=claims.supervisor_id,
+            incident_id=incident_id,
+            scenario_id=scenario.id,
+        )
+        return _scenario_out(scenario)
+
+    @app.get("/impact-report", response_model=ImpactReportModel)
+    def get_impact_report(claims: SessionTokenClaims = Depends(_bearer_claims)):
+        incidents = incident_store.list()
+        sessions_by_supervisor = {
+            supervisor_id: session_store.list_sessions(supervisor_id)
+            for supervisor_id in {incident.supervisor_id for incident in incidents}
+        }
+        report = compute_impact_report(incidents, sessions_by_supervisor)
+        return ImpactReportModel(
+            trained=GroupStatsModel(**report.trained.__dict__),
+            untrained=GroupStatsModel(**report.untrained.__dict__),
+            total_incidents=report.total_incidents,
+            is_conclusive=report.is_conclusive,
+            caveat=report.caveat,
+        )
 
     # -----------------------------------------------------------------
     # WebSocket — el loop de llamada en vivo real.
@@ -579,6 +692,22 @@ def _scenario_fields(body: ScenarioIn) -> dict:
             for p in body.critical_data_points
         ],
     }
+
+
+def _incident_out(incident: IncidentOutcome) -> IncidentOut:
+    return IncidentOut(
+        id=incident.id,
+        occurred_at=incident.occurred_at,
+        supervisor_id=incident.supervisor_id,
+        category=incident.category,
+        outcome_rating=incident.outcome_rating,
+        critical_data_captured=incident.critical_data_captured,
+        protocol_followed=incident.protocol_followed,
+        notes=incident.notes,
+        reported_by=incident.reported_by,
+        promoted_scenario_id=incident.promoted_scenario_id,
+        created_at=incident.created_at,
+    )
 
 
 def _training_session(record: SessionRecord) -> dict:

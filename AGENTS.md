@@ -21,9 +21,11 @@ documento enlazado, el documento enlazado gana.
 7. [`docs/designs/police-call-training-simulator.md`](./docs/designs/police-call-training-simulator.md)
    y [`docs/designs/roadmap-3-fases.md`](./docs/designs/roadmap-3-fases.md) — el análisis
    completo de producto/premisas y el roadmap de 3 fases que originó los ADRs de este baseline.
-8. [`docs/architecture/PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md) — estado
-   real de cada ítem del checklist de cierre de Fase 1 (DONE/IN PROGRESS/BLOCKED), para no
-   volver a explorar el código desde cero cada sesión.
+8. [`docs/architecture/PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md),
+   [`PHASE2-PROGRESS.md`](./docs/architecture/PHASE2-PROGRESS.md) y
+   [`PHASE3-PROGRESS.md`](./docs/architecture/PHASE3-PROGRESS.md) — estado real de cada ítem
+   del checklist de cierre de cada fase (DONE/IN PROGRESS/BLOCKED/no construido a propósito),
+   para no volver a explorar el código desde cero cada sesión.
 
 ## Reglas arquitectónicas no negociables
 
@@ -48,11 +50,18 @@ adaptadores de persistencia (SQLite, ADR-0007) y auth (token propio, ADR-0008), 
 estados de turno completa (`core/turn_state.py`), y un servidor FastAPI/WebSocket real
 (`server/app.py` + `server_main.py`) que cablea todo lo anterior — login, handshake autenticado
 con scope por sesión, sincronización de eventos de turno, registro de sesión al desconectar,
-**y WSS/TLS** (certificado autofirmado por default, `server/tls.py`). Lo que ese servidor
-todavía NO tiene: el pipeline de audio real (VAD/chunks — a propósito, ver
-PHASE1-PROGRESS.md) y logging estructurado (NFR-08). Harness de tests real, 49 tests, ver
-`pytest.ini`. Ver [`PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md) para el
-detalle ítem por ítem.
+**y WSS/TLS** (certificado autofirmado por default, `server/tls.py`). Fase 3 agregó el dominio de
+incidentes reales (`core/ports.py::IncidentOutcome`, `core/impact_metrics.py`,
+`persistence/sqlite_incident_store.py`) — captura manual + correlación entrenado/no entrenado
+derivada de sesiones reales, `GET/POST/DELETE /incidents` y `GET /impact-report` — y el lazo de
+retroalimentación (`POST /incidents/{id}/promote-to-scenario`). El cliente Electron ganó
+auto-update (`electron-updater`, `frontend/electron/main.cjs`). Lo que ese servidor todavía NO
+tiene: el pipeline de audio real (VAD/chunks — a propósito, ver PHASE1-PROGRESS.md), barge-in,
+SSO corporativo, ni control de acceso por rol (TODO-16, nuevo en Fase 3). Harness de tests
+real, 106 tests, ver `pytest.ini`. Ver
+[`PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md),
+[`PHASE2-PROGRESS.md`](./docs/architecture/PHASE2-PROGRESS.md) y
+[`PHASE3-PROGRESS.md`](./docs/architecture/PHASE3-PROGRESS.md) para el detalle ítem por ítem.
 Antes de extender este código, leer [ADR-0006](./docs/architecture/adr/0006-arquitectura-hexagonal.md):
 sigue siendo referencia de lógica de dominio (parámetros de STT/TTS, system prompt), no la base
 del servidor de Fase 1 — el core async/WebSocket todavía no existe.

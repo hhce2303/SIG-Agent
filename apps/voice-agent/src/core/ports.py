@@ -210,3 +210,54 @@ class SessionTokenPort(Protocol):
 
     def verify(self, token: str) -> SessionTokenClaims:
         ...
+
+
+# ---------------------------------------------------------------------------
+# Incidentes reales — roadmap Fase 3 ("cierre del lazo de impacto real"). Captura manual
+# (decisión del usuario: no existe ningún sistema de post-mortems/incidentes con el que
+# integrar todavía) de un incidente real ya resuelto, para dos fines separados del roadmap:
+# 1. Métrica de resultado real: `core/impact_metrics.py` correlaciona esto contra
+#    `PersistencePort.list_sessions` (¿el supervisor había completado entrenamiento antes de la
+#    fecha del incidente?) — la etiqueta "entrenado/no entrenado" nunca se captura a mano, se
+#    deriva de sesiones reales para no depender de que alguien la recuerde bien.
+# 2. Lazo de retroalimentación: `notes` (el post-mortem en texto libre) es la fuente de la que
+#    se puede promover un `Scenario` nuevo — ver `promoted_scenario_id` y el endpoint
+#    `POST /incidents/{id}/promote-to-scenario` en `server/app.py`.
+#
+# Sin control de acceso por rol (no existe ese concepto en este repo — ver TODO-15): cualquier
+# sesión autenticada puede crear/leer/promover incidentes, igual que ya pasa hoy con el CRUD de
+# escenarios. Documentado como brecha conocida, no como omisión silenciosa.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class IncidentOutcome:
+    id: str
+    occurred_at: float
+    supervisor_id: str
+    category: str
+    outcome_rating: int  # 1-5, asignado por quien registra el incidente (manager/RRHH)
+    critical_data_captured: bool
+    protocol_followed: bool
+    notes: str = ""  # post-mortem en texto libre — fuente del lazo de retroalimentación
+    reported_by: str = ""
+    promoted_scenario_id: str = ""  # no vacío una vez que alimentó la librería de escenarios
+    created_at: float = 0.0
+
+
+@runtime_checkable
+class IncidentOutcomePort(Protocol):
+    def list(self) -> list[IncidentOutcome]:
+        ...
+
+    def get(self, incident_id: str) -> IncidentOutcome | None:
+        ...
+
+    def create(self, incident: IncidentOutcome) -> None:
+        ...
+
+    def delete(self, incident_id: str) -> None:
+        ...
+
+    def mark_promoted(self, incident_id: str, scenario_id: str) -> None:
+        ...

@@ -28,6 +28,7 @@ from audio.microphone import MicrophoneRecorder
 from auth.session_token import HmacSessionTokenIssuer
 from core.observability import configure_logging
 from llm.claude import ClaudeDispatcher
+from persistence.sqlite_incident_store import SQLiteIncidentStore
 from persistence.sqlite_scenario_store import SQLiteScenarioStore
 from persistence.sqlite_settings_store import SQLiteSettingsStore
 from persistence.sqlite_store import SQLiteSessionStore
@@ -55,6 +56,7 @@ def build_app():
         session_store=SQLiteSessionStore(sessions_db_path),
         scenario_store=SQLiteScenarioStore(sessions_db_path),
         settings_store=SQLiteSettingsStore(sessions_db_path),
+        incident_store=SQLiteIncidentStore(sessions_db_path),
         supervisor_passphrase=os.environ["SUPERVISOR_PASSPHRASE"],
         dispatcher=ClaudeDispatcher(
             api_key=os.environ["ANTHROPIC_API_KEY"],

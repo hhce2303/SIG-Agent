@@ -1,4 +1,4 @@
-import { BarChart3, BookOpen, ClipboardList, Headphones, Home, Settings } from 'lucide-react'
+import { BarChart3, BookOpen, ClipboardList, Headphones, Home, Settings, TrendingUp } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
 
 const items = [
@@ -6,6 +6,8 @@ const items = [
   { to: '/training', label: 'Training', icon: Headphones },
   { to: '/performance', label: 'Performance', icon: BarChart3 },
   { to: '/scenarios', label: 'Scenarios', icon: ClipboardList },
+  // Fase 3 (roadmap): "cierre del lazo de impacto real" — correlación contra incidentes reales.
+  { to: '/impact', label: 'Impact', icon: TrendingUp },
   { to: '/resources', label: 'Resources', icon: BookOpen },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
