@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { DEFAULT_BACKEND_WS_URL } from '../config'
+import { buildWsUrl, httpBaseFrom, login as apiLogin } from '../lib/api'
 import { voiceBridge, type ConnectionStatus } from '../lib/voiceBridge'
 import type { CallStatus, EngineEvent, ScenarioSummary, TrainingSession, TranscriptEntry } from '../types'
 
@@ -18,6 +19,12 @@ type EngineState = {
   engineVersion: string
   bridgeUrl: string
   userName: string
+  // Fase 2 (login, ADR-0008): el WS real exige token — nada de esto se persiste en
+  // localStorage (el token vive 8h, NFR-04, y no debe sobrevivir a un cierre de la app).
+  sessionId?: string
+  authToken?: string
+  authError?: string
+  authenticating: boolean
   scenarios: ScenarioSummary[]
   history: TrainingSession[]
   selectedScenarioId: string
@@ -36,6 +43,8 @@ type EngineState = {
   error?: string
   warning?: string
   initialize: () => void
+  login: (supervisorId: string, passphrase: string) => Promise<void>
+  logout: () => void
   setConfig: (patch: Partial<Pick<EngineState, PersistedConfig>>) => void
   updateSettings: (bridgeUrl: string, userName: string) => void
   startCall: () => void
@@ -44,6 +53,7 @@ type EngineState = {
   resume: () => void
   endCall: () => void
   refreshHistory: () => void
+  refreshScenarios: () => void
   clearNotice: () => void
 }
 
@@ -53,6 +63,7 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
   engineVersion: '',
   bridgeUrl: DEFAULT_BACKEND_WS_URL,
   userName: 'Jordan Smith',
+  authenticating: false,
   scenarios: fallbackScenarios,
   history: [],
   selectedScenarioId: 'vehicle_theft',
@@ -67,6 +78,8 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
   recording: false,
 
   initialize: () => {
+    // Solo cablea los listeners del bridge — ya no conecta acá. La conexión real requiere un
+    // token de sesión (ADR-0008/NFR-04), que recién existe después de `login()`.
     if (get().initialized) return
     set({ initialized: true })
     voiceBridge.subscribeStatus((connection) => {
@@ -97,12 +110,31 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
         case 'error': set({ error: event.message, recording: false, operatorSpeaking: false }); break
       }
     })
-    voiceBridge.connect(get().bridgeUrl)
   },
+
+  login: async (supervisorId, passphrase) => {
+    set({ authenticating: true, authError: undefined })
+    try {
+      const { sessionId, token } = await apiLogin(httpBaseFrom(get().bridgeUrl), supervisorId, passphrase)
+      set({ sessionId, authToken: token, userName: supervisorId, authenticating: false })
+      voiceBridge.connect(buildWsUrl(get().bridgeUrl, sessionId, token))
+    } catch (error) {
+      set({ authenticating: false, authError: error instanceof Error ? error.message : 'Login failed.' })
+    }
+  },
+
+  logout: () => {
+    voiceBridge.disconnect()
+    set({ sessionId: undefined, authToken: undefined, connection: 'disconnected', callStatus: 'idle' })
+  },
+
   setConfig: (patch) => set(patch),
   updateSettings: (bridgeUrl, userName) => {
+    const changedBackend = bridgeUrl !== get().bridgeUrl
     set({ bridgeUrl, userName })
-    voiceBridge.reconnect(bridgeUrl)
+    // Un backend distinto significa una sesión de auth distinta (ADR-0008 no es multi-tenant
+    // entre hosts) — forzamos un login nuevo en vez de reusar un token que ya no aplica.
+    if (changedBackend) get().logout()
   },
   startCall: () => {
     const state = get()
@@ -123,6 +155,7 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
   resume: () => voiceBridge.send({ command: 'call.resume' }),
   endCall: () => voiceBridge.send({ command: 'call.end' }),
   refreshHistory: () => voiceBridge.send({ command: 'history.list' }),
+  refreshScenarios: () => voiceBridge.send({ command: 'scenarios.list' }),
   clearNotice: () => set({ error: undefined, warning: undefined }),
 }), {
   name: 'sig-agent-settings',

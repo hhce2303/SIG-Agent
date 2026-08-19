@@ -14,6 +14,65 @@ class MicrophoneRecorder(MicrophonePort):
     ):
         self.sample_rate = sample_rate
         self.channels = channels
+        self._stream: sd.InputStream | None = None
+        self._frames: list[np.ndarray] = []
+        self._output_path = "recording.wav"
+
+    def start_recording(self, output_path: str = "recording.wav") -> None:
+        """Abre el micrófono en modo streaming, sin bloquear — roadmap Fase 2: el servidor real
+        recibe `recording.start`/`recording.stop` como dos comandos WS separados, no puede
+        esperar un `input()` de teclado como el modo interactivo de `record()` de arriba.
+
+        No es parte de `MicrophonePort` original (`record()` solo) — se agregó como método
+        nuevo del puerto en vez de un cambio de firma, así el prototipo CLI/`VoiceConversation`
+        no se ven afectados (ver CONTRIBUTING.md regla 6, no romper en cascada).
+        """
+
+        self._frames = []
+        self._output_path = output_path
+
+        def callback(indata, frames_count, time_info, status):
+            if status:
+                print(status)
+
+            self._frames.append(indata.copy())
+
+        self._stream = sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=self.channels,
+            dtype="float32",
+            callback=callback,
+        )
+        self._stream.start()
+
+    def stop_recording(self) -> str:
+        """Cierra la captura abierta por `start_recording` y guarda el WAV. Compañero de
+        `start_recording` para el servidor real — ver docstring de arriba."""
+
+        if self._stream is None:
+            raise RuntimeError("stop_recording() called without a prior start_recording()")
+
+        self._stream.stop()
+        self._stream.close()
+        self._stream = None
+
+        if not self._frames:
+            raise RuntimeError("No audio was recorded.")
+
+        audio = np.concatenate(self._frames).reshape(-1)
+        return self._save(audio, self._output_path)
+
+    def is_available(self) -> bool:
+        """Chequeo de mic previo a `call.start` (roadmap Fase 2: estado "conectando/chequeo de
+        mic" antes de iniciar la llamada) — no abre el stream, solo confirma que existe al
+        menos un dispositivo de entrada."""
+
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return False
+
+        return any(device.get("max_input_channels", 0) > 0 for device in devices)
 
     def record(
         self,

@@ -92,6 +92,41 @@ def test_disconnected_is_valid_from_any_non_terminal_state_and_only_reconnected_
     assert machine.state is TurnState.LISTENING
 
 
+@pytest.mark.parametrize(
+    "starting_event",
+    [
+        "supervisor_started_speaking",
+        "supervisor_started_speaking,supervisor_stopped_speaking",
+        None,
+    ],
+)
+def test_pause_is_valid_from_any_active_state_and_resume_always_returns_to_listening(starting_event):
+    """Roadmap Fase 2: control de pausa/abortar la práctica. Reanudar siempre vuelve a
+    `listening`, la misma simplificación que ya usa `network_restored`."""
+    machine = TurnStateMachine(clock=make_clock())
+    for event in (starting_event or "").split(","):
+        if event:
+            machine.handle(event)
+
+    machine.handle("pause_requested")
+    assert machine.state is TurnState.PAUSED
+
+    machine.handle("resume_requested")
+    assert machine.state is TurnState.LISTENING
+
+
+def test_dispatcher_greets_first_without_going_through_processing():
+    """El dispatcher saluda antes de que el supervisor diga nada — única transición directa de
+    `listening` a `dispatcher_speaking` (roadmap: orden mínimo de eventos de `call.start`)."""
+    machine = TurnStateMachine(clock=make_clock())
+
+    machine.handle("dispatcher_greeting")
+    assert machine.state is TurnState.DISPATCHER_SPEAKING
+
+    machine.handle("dispatcher_finished_speaking")
+    assert machine.state is TurnState.LISTENING
+
+
 def test_invalid_event_from_current_state_raises_and_does_not_change_state():
     machine = TurnStateMachine(clock=make_clock())
 

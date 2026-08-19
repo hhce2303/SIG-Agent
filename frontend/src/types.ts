@@ -6,6 +6,29 @@ export type ScenarioSummary = {
   difficulty: string
 }
 
+// Fase 2 (roadmap, TODO-11 resuelto: campos estructurados + narrativa libre). `ScenarioSummary`
+// arriba sigue siendo exactamente lo que ya manda `scenarios.data` por WS (sin romper el
+// contrato) — esto es lo que agrega el editor CRUD nuevo, servido por REST.
+export type CriticalDataPointDef = { key: string; label: string; required: boolean }
+
+export type ScenarioDetail = ScenarioSummary & {
+  language: string
+  briefing: string
+  critical_data_points: CriticalDataPointDef[]
+  created_at: number
+  updated_at: number
+}
+
+export type ScenarioInput = {
+  title: string
+  category: string
+  difficulty: string
+  language: string
+  description: string
+  briefing: string
+  critical_data_points: CriticalDataPointDef[]
+}
+
 export type TranscriptEntry = { role: 'operator' | 'dispatcher'; text: string; seconds: number }
 
 export type CallStatus =

@@ -23,6 +23,9 @@ class TurnState(Enum):
     FALSE_CUTOFF_RECOVERY = "false_cutoff_recovery"
     DEGRADED_NETWORK = "degraded_network"
     DISCONNECTED = "disconnected"
+    # Fase 2 (roadmap: "control de pausa/abortar la práctica") — `call.pause`/`call.resume`
+    # del protocolo WS no tenían dónde vivir en la máquina de estados hasta ahora.
+    PAUSED = "paused"
 
 
 class InvalidTurnTransitionError(Exception):
@@ -49,23 +52,37 @@ class TurnTransition:
 _TRANSITIONS: dict[TurnState, dict[str, TurnState]] = {
     TurnState.LISTENING: {
         "supervisor_started_speaking": TurnState.SUPERVISOR_SPEAKING,
+        "pause_requested": TurnState.PAUSED,
+        # El dispatcher saluda primero al iniciar la llamada (roadmap: orden mínimo de eventos
+        # de `frontend/BACKEND_REQUIREMENTS.md` §6) — única forma de llegar a
+        # `dispatcher_speaking` sin pasar por `processing` primero.
+        "dispatcher_greeting": TurnState.DISPATCHER_SPEAKING,
     },
     TurnState.SUPERVISOR_SPEAKING: {
         "supervisor_stopped_speaking": TurnState.PROCESSING,
         "false_cutoff_detected": TurnState.FALSE_CUTOFF_RECOVERY,
+        "pause_requested": TurnState.PAUSED,
     },
     TurnState.PROCESSING: {
         "dispatcher_response_ready": TurnState.DISPATCHER_SPEAKING,
         "processing_timed_out": TurnState.DISPATCHER_SPEAKING,
+        "pause_requested": TurnState.PAUSED,
     },
     TurnState.DISPATCHER_SPEAKING: {
         "dispatcher_finished_speaking": TurnState.LISTENING,
+        "pause_requested": TurnState.PAUSED,
     },
     TurnState.FALSE_CUTOFF_RECOVERY: {
         "resume_listening": TurnState.SUPERVISOR_SPEAKING,
     },
     TurnState.DEGRADED_NETWORK: {
         "network_restored": TurnState.LISTENING,
+    },
+    # Fase 2: reanudar siempre vuelve a `listening`, nunca al estado exacto de antes de la
+    # pausa — es la misma simplificación que ya hace `network_restored`, y evita tener que
+    # recordar/serializar "en qué estaba" mientras estuvo pausada.
+    TurnState.PAUSED: {
+        "resume_requested": TurnState.LISTENING,
     },
 }
 

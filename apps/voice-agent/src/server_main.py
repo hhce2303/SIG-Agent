@@ -24,11 +24,17 @@ import os
 import uvicorn
 from dotenv import load_dotenv
 
+from audio.microphone import MicrophoneRecorder
 from auth.session_token import HmacSessionTokenIssuer
 from core.observability import configure_logging
+from llm.claude import ClaudeDispatcher
+from persistence.sqlite_scenario_store import SQLiteScenarioStore
+from persistence.sqlite_settings_store import SQLiteSettingsStore
 from persistence.sqlite_store import SQLiteSessionStore
 from server.app import create_app
 from server.tls import ensure_self_signed_cert
+from stt.whisper import WhisperSTT
+from tts.kokoro import KokoroTTS
 
 load_dotenv()
 configure_logging()  # NFR-08: logs estructurados desde el arranque del proceso, no agregados después.
@@ -39,14 +45,24 @@ def build_app():
         secret_key=os.environ["SESSION_TOKEN_SECRET"].encode(),
     )
 
-    session_store = SQLiteSessionStore(
-        os.getenv("SESSIONS_DB_PATH", "sessions.db"),
-    )
+    sessions_db_path = os.getenv("SESSIONS_DB_PATH", "sessions.db")
 
+    # Fase 2 (cierre del gap de Fase 1): el servidor ahora invoca STT/Claude/TTS reales —
+    # antes solo sincronizaba eventos de `TurnStateMachine` como JSON. Mismos adaptadores y
+    # mismas variables de entorno que ya usa el prototipo CLI (`main.py`, NFR-03).
     return create_app(
         token_issuer=token_issuer,
-        session_store=session_store,
+        session_store=SQLiteSessionStore(sessions_db_path),
+        scenario_store=SQLiteScenarioStore(sessions_db_path),
+        settings_store=SQLiteSettingsStore(sessions_db_path),
         supervisor_passphrase=os.environ["SUPERVISOR_PASSPHRASE"],
+        dispatcher=ClaudeDispatcher(
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            model=os.environ["CLAUDE_MODEL"],
+        ),
+        stt=WhisperSTT(model_size="small", device="cpu", compute_type="int8"),
+        tts=KokoroTTS(voice=os.getenv("KOKORO_VOICE", "am_michael")),
+        microphone=MicrophoneRecorder(),
     )
 
 

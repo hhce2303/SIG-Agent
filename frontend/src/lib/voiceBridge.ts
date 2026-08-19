@@ -49,6 +49,17 @@ class VoiceBridge {
     window.setTimeout(() => this.connect(url), 0)
   }
 
+  // Fase 2 (login): a diferencia de `reconnect`, esto no vuelve a abrir nada — se usa al cerrar
+  // sesión o cuando cambia el backend configurado y hace falta un login nuevo antes de conectar.
+  disconnect() {
+    this.intentionallyClosed = true
+    window.clearTimeout(this.reconnectTimer)
+    this.socket?.close()
+    this.socket = undefined
+    this.queue = []
+    this.publishStatus('disconnected')
+  }
+
   subscribe(listener: (event: EngineEvent) => void) {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
