@@ -28,13 +28,14 @@ gate de Fase 0 (spike de validación) tampoco está confirmado como corrido — 
 | Harness de tests real ANTES de tocar el rewrite | **DONE** (nivel prototipo) | pytest en `apps/voice-agent/pytest.ini` + `src/test_*.py` (34 tests): unitarios con I/O mockeado para STT/TTS/LLM/micrófono/persistencia/auth/state machine, integración con stub de Claude, test de caos con error de Claude inyectado a mitad de turno. Incluye el fix del bug de `test_microphone.py` (`duration` no existía en `MicrophoneRecorder.record()` — ahora sí, ver `audio/microphone.py`). |
 | Puertos/adaptadores formalizados (base para el rewrite) | **DONE** | `core/ports.py` (ADR-0006) — `MicrophonePort`, `SpeechToTextPort`, `TextToSpeechPort`, `DispatcherPort`, `PersistencePort`, `SessionTokenPort`, `DispatcherError`, `InvalidSessionTokenError`. `core/conversation.py` ya solo importa puertos, no adaptadores concretos. |
 | Manejo de error de Claude API como estado de primera clase | **IN PROGRESS** (versión mínima) | `llm/claude.py`: reintento acotado ante errores transitorios (`APIConnectionError`, `APITimeoutError`, `RateLimitError`, `InternalServerError`, `OverloadedError`), `DispatcherError` si se agotan. `core/conversation.py`: recuperación en el propio diálogo (`DISPATCHER_RECOVERY_LINE`). **Falta:** timeout configurable explícito (hoy depende del timeout default del SDK de Anthropic), y esto todavía corre en el prototipo CLI síncrono, no en el servidor async real. |
-| Motor de persistencia — "la sesión queda registrada" | **IN PROGRESS** | [ADR-0007](./adr/0007-motor-de-persistencia.md) `accepted`. Adaptador `persistence/sqlite_store.py::SQLiteSessionStore` implementado y probado (`test_persistence.py`) contra `PersistencePort`/`SessionRecord`. **Falta:** nadie lo llama todavía — el server que escriba una sesión real al terminar una llamada no existe aún. |
-| Auth por sesión (NFR-04) | **IN PROGRESS** | [ADR-0008](./adr/0008-mecanismo-de-autenticacion-de-sesion.md) `accepted`. Adaptador `auth/session_token.py::HmacSessionTokenIssuer` implementado y probado (`test_auth.py`) contra `SessionTokenPort`. **Falta:** WSS/TLS (NFR-05) y el propio servidor que exija el token en el handshake de WebSocket — el gate de AGENTS.md regla 5 sigue sin cumplirse hasta que exista el servidor real. |
-| State machine de turnos explícito (listening/hablando/procesando/etc.) | **DONE** (dominio, sin conectar a I/O real) | `core/turn_state.py::TurnStateMachine` — los 7 estados del roadmap, timeout de `processing` con fallback a la línea de recuperación, recuperación de corte falso, red degradada/desconexión válidas desde cualquier estado no terminal. Probado en `test_turn_state.py`. **Falta:** conectarla a VAD real y a una conexión WebSocket real — hoy es una máquina de estados que nadie alimenta con eventos reales todavía. |
-| Core async de servidor (FastAPI/WebSocket) + pipeline de audio Electron | **NOT STARTED** | Reescritura completa, no extensión del prototipo (ver ADR-0006, AGENTS.md). Las piezas de las que depende (persistencia, auth, state machine) ya están construidas y probadas por separado — este ítem es específicamente cablearlas juntas detrás de FastAPI/WebSocket, más VAD real. |
+| Motor de persistencia — "la sesión queda registrada" | **DONE** (a nivel servidor de eventos de turno) | `persistence/sqlite_store.py::SQLiteSessionStore` (ADR-0007) ya lo llama el servidor real: `server/app.py` guarda un `SessionRecord` al desconectar cualquier WebSocket de sesión, en cualquier estado. Probado de punta a punta en `test_server_app.py::test_disconnecting_persists_the_session_record`. **Falta:** hoy graba eventos de turno, no todavía transcripciones/audio de la llamada real (eso llega con el pipeline de audio real, ver abajo). |
+| Auth por sesión (NFR-04) | **DONE** (mecanismo + scope por conexión) | `auth/session_token.py::HmacSessionTokenIssuer` (ADR-0008) + `server/app.py`: `POST /auth/login` emite el token, el handshake de WebSocket lo valida y rechaza (código WS 1008) tanto un token inválido/expirado como uno que no corresponde al `session_id` de la URL — NFR-04 ("una conexión no puede apuntar a la sesión de otra") probado explícitamente en `test_server_app.py::test_websocket_rejects_token_for_a_different_session`. **Falta:** WSS/TLS (NFR-05, ver fila siguiente) y credenciales reales por supervisor — hoy es una passphrase compartida (`SUPERVISOR_PASSPHRASE`), no una cuenta por persona; ver Options not chosen de ADR-0008 si aparece un SSO real. |
+| State machine de turnos explícito (listening/hablando/procesando/etc.) | **DONE** (dominio) + **conectada al servidor** | `core/turn_state.py::TurnStateMachine`, cableada en `server/app.py` a eventos JSON entrantes por WebSocket (`{"event": "..."}`) con la respuesta de nuevo estado o de error sin cerrar la conexión (NFR-02). Probado en `test_turn_state.py` y `test_server_app.py`. **Falta:** hoy los eventos de turno los dispara quien sea que hable el protocolo WebSocket a mano (o un test) — todavía no hay VAD real disparándolos desde audio de micrófono. |
+| Core async de servidor (FastAPI/WebSocket) | **DONE** (esqueleto: login + handshake + turnos + registro) | `server/app.py::create_app` (factory) + `server_main.py` (entry point real con `uvicorn`). Se agregaron `fastapi`/`uvicorn[standard]` como dependencias (`uv add`, ver `pyproject.toml`/`uv.lock`). 8 tests de integración contra `TestClient` en `test_server_app.py`, sin mocks de bajo nivel — ejercita la app ASGI real. |
+| Pipeline de audio real (VAD → chunks → STT/TTS) sobre la conexión | **NOT STARTED — a propósito** | El servidor de arriba sincroniza *eventos de turno* como JSON, no audio binario. El formato de chunk, dónde vive el VAD, y el tamaño de buffer dependen del resultado del spike de latencia de Gate 0 (TODO-08) — no hay ADR de protocolo de audio todavía, e inventar uno sin ese dato violaría la regla ADR-first de CONTRIBUTING.md. Ver el docstring de `server/app.py` para el razonamiento completo. |
 | Confianza de STT por segmento + confirmación de datos críticos (NFR-09) | **NOT STARTED** | `test_stt.py::test_transcribe_unclear_vin_fixture_...` documenta el fixture de VIN poco claro y el comportamiento actual (la confianza no se expone) — sirve de regresión para cuando esto se implemente. |
-| WSS/TLS (gate de seguridad, junto con auth) | **NOT STARTED** | Depende de que exista el servidor real — no hay nada que cifrar todavía. |
-| Logging estructurado con correlation id + latencia por turno | **NOT STARTED** | Depende del core async de servidor (NFR-08). |
+| WSS/TLS (NFR-05) | **NOT STARTED** | `server_main.py` lo deja explícito en su docstring: no correr esto contra la LAN real sin TLS delante (ej. reverse proxy) — hoy el servidor corre en texto plano (HTTP/WS), suficiente para tests locales, no para producción. Sin esto, el gate de seguridad de AGENTS.md regla 5 sigue sin cumplirse del todo aunque el mecanismo de auth ya exista. |
+| Logging estructurado con correlation id + latencia por turno | **NOT STARTED** | El servidor ya tiene los puntos naturales para instrumentar esto (cada evento de turno, cada request de login) — falta el logging en sí (NFR-08). |
 
 ## Frontend (Electron + React + Tailwind)
 
@@ -66,20 +67,29 @@ sigan `PENDING`.
 
 ## Próxima sesión de trabajo (sugerido, no comprometido)
 
-1. Núcleo async de servidor (FastAPI/WebSocket): cablear `TurnStateMachine`,
-   `SQLiteSessionStore` y `HmacSessionTokenIssuer` (ya construidos y probados) detrás de un
-   endpoint WebSocket real, con WSS/TLS.
+1. WSS/TLS delante del servidor (NFR-05) — cierra el gate de seguridad de auth junto con
+   ADR-0008 ya aceptado.
 2. Confirmar si el spike de Gate 0 (TODO-08) ya corrió fuera de este repo o sigue pendiente —
-   condiciona si ADR-0004 (servidor LAN) sigue siendo la base correcta para el punto 1.
+   condiciona si el protocolo de audio real (chunk size, punto de VAD) se puede empezar a
+   diseñar, y si ADR-0004 (servidor LAN) sigue siendo la base correcta.
 3. Decidir dónde empieza el proyecto Electron+React+Tailwind (repo nuevo dentro de `apps/`,
-   estructura de carpetas, gestor de paquetes) — todavía no existe ni un scaffold.
+   estructura de carpetas, gestor de paquetes) — todavía no existe ni un scaffold. El cliente
+   necesita hablar el protocolo de eventos de turno que ya expone `server/app.py` (login →
+   WebSocket con `?token=`) para tener algo real contra qué integrar.
+4. NFR-09 (confianza de STT por segmento + confirmación de VIN/placa) — el fixture de test ya
+   documenta el gap exacto en `test_stt.py`.
 
 ## Historial de sesiones de trabajo
 
-- **2026-08-19 (sesión 1):** harness de tests (34 tests), puertos formalizados, manejo de error
-  de Claude como estado de primera clase (versión mínima), ADR-0007 y ADR-0008 propuestos y
-  aceptados por el usuario, adaptadores de persistencia (SQLite) y auth (token HMAC)
-  implementados y probados, state machine de turnos implementada y probada. Nada de esto está
-  todavía conectado a un servidor real ni a hardware real (mic/RTX) — son piezas de dominio y
-  adaptador probadas de forma aislada, siguiendo NFR-10 al pie de la letra ("tests antes del
-  rewrite").
+- **2026-08-19 (sesión 1):** harness de tests, puertos formalizados, manejo de error de Claude
+  como estado de primera clase (versión mínima), ADR-0007 y ADR-0008 propuestos y aceptados por
+  el usuario, adaptadores de persistencia (SQLite) y auth (token HMAC) implementados y probados,
+  state machine de turnos implementada y probada — todo en aislamiento, sin servidor real
+  todavía (NFR-10 al pie de la letra: "tests antes del rewrite").
+- **2026-08-19 (sesión 2, misma fecha, iteración siguiente del loop):** servidor FastAPI/
+  WebSocket real (`server/app.py` + `server_main.py`) cableando las piezas de la sesión 1 —
+  login, handshake autenticado con scope por sesión (NFR-04), sincronización de eventos de
+  turno, registro de sesión al desconectar. Se agregaron `fastapi`/`uvicorn[standard]` como
+  dependencias nuevas (`uv add`). 42 tests en total, todos verdes. Se decidió explícitamente
+  NO inventar el protocolo de audio binario (chunk/VAD) sin el dato del spike de Gate 0 — ver
+  la fila "Pipeline de audio real" arriba.
