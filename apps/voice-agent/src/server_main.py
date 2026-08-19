@@ -25,11 +25,13 @@ import uvicorn
 from dotenv import load_dotenv
 
 from auth.session_token import HmacSessionTokenIssuer
+from core.observability import configure_logging
 from persistence.sqlite_store import SQLiteSessionStore
 from server.app import create_app
 from server.tls import ensure_self_signed_cert
 
 load_dotenv()
+configure_logging()  # NFR-08: logs estructurados desde el arranque del proceso, no agregados después.
 
 
 def build_app():

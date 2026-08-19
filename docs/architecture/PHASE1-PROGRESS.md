@@ -33,9 +33,9 @@ gate de Fase 0 (spike de validación) tampoco está confirmado como corrido — 
 | State machine de turnos explícito (listening/hablando/procesando/etc.) | **DONE** (dominio) + **conectada al servidor** | `core/turn_state.py::TurnStateMachine`, cableada en `server/app.py` a eventos JSON entrantes por WebSocket (`{"event": "..."}`) con la respuesta de nuevo estado o de error sin cerrar la conexión (NFR-02). Probado en `test_turn_state.py` y `test_server_app.py`. **Falta:** hoy los eventos de turno los dispara quien sea que hable el protocolo WebSocket a mano (o un test) — todavía no hay VAD real disparándolos desde audio de micrófono. |
 | Core async de servidor (FastAPI/WebSocket) | **DONE** (esqueleto: login + handshake + turnos + registro) | `server/app.py::create_app` (factory) + `server_main.py` (entry point real con `uvicorn`). Se agregaron `fastapi`/`uvicorn[standard]` como dependencias (`uv add`, ver `pyproject.toml`/`uv.lock`). 8 tests de integración contra `TestClient` en `test_server_app.py`, sin mocks de bajo nivel — ejercita la app ASGI real. |
 | Pipeline de audio real (VAD → chunks → STT/TTS) sobre la conexión | **NOT STARTED — a propósito** | El servidor de arriba sincroniza *eventos de turno* como JSON, no audio binario. El formato de chunk, dónde vive el VAD, y el tamaño de buffer dependen del resultado del spike de latencia de Gate 0 (TODO-08) — no hay ADR de protocolo de audio todavía, e inventar uno sin ese dato violaría la regla ADR-first de CONTRIBUTING.md. Ver el docstring de `server/app.py` para el razonamiento completo. |
-| Confianza de STT por segmento + confirmación de datos críticos (NFR-09) | **NOT STARTED** | `test_stt.py::test_transcribe_unclear_vin_fixture_...` documenta el fixture de VIN poco claro y el comportamiento actual (la confianza no se expone) — sirve de regresión para cuando esto se implemente. |
-| WSS/TLS (NFR-05) | **NOT STARTED** | `server_main.py` lo deja explícito en su docstring: no correr esto contra la LAN real sin TLS delante (ej. reverse proxy) — hoy el servidor corre en texto plano (HTTP/WS), suficiente para tests locales, no para producción. Sin esto, el gate de seguridad de AGENTS.md regla 5 sigue sin cumplirse del todo aunque el mecanismo de auth ya exista. |
-| Logging estructurado con correlation id + latencia por turno | **NOT STARTED** | El servidor ya tiene los puntos naturales para instrumentar esto (cada evento de turno, cada request de login) — falta el logging en sí (NFR-08). |
+| Confianza de STT por segmento + confirmación de datos críticos (NFR-09) | **DONE** (versión mínima, sin UI) | `stt/whisper.py::WhisperSTT`: segmentos con `avg_logprob` bajo el umbral se marcan inline como `[unclear: ...]` (`test_stt.py`, incluye el fixture de VIN poco claro). `llm/claude.py`: el system prompt instruye al dispatcher a pedir confirmación explícita de un dato crítico marcado así, en vez de aceptarlo en silencio (`test_claude_dispatcher.py::test_respond_system_prompt_instructs_confirming_unclear_critical_data`). **Falta:** esto depende de que el LLM realmente siga la instrucción (no hay garantía dura de modelo) y de que la UI del cliente refleje esa confirmación visualmente — hoy es solo comportamiento de diálogo. |
+| WSS/TLS (NFR-05) | **DONE** (certificado autofirmado, prendido por default) | `server/tls.py::ensure_self_signed_cert` genera cert+key si no existen (idempotente — no se regenera en cada arranque). `server_main.py::build_uvicorn_kwargs` los pasa a `uvicorn.run` por default; `DISABLE_TLS=1` es el escape hatch explícito solo para desarrollo local. Probado en `test_server_tls.py` y `test_server_main.py`. **Falta:** esto es un cert autofirmado — cada máquina de supervisor necesita confiar en él una vez (paso operativo, ver TODO-03), o alguien pone un reverse proxy con un cert real delante. Con esto, el gate de AGENTS.md regla 5 (auth + WSS/TLS) queda técnicamente cumplido — el spike de Gate 0 y el resto de bloqueantes organizacionales siguen sin resolver aparte. |
+| Logging estructurado con correlation id | **IN PROGRESS** | `core/observability.py` (JSON por línea, `log_event` con `correlation_id` explícito) cableado en `server/app.py`: `login_succeeded`/`login_failed`, `session_connected`, `turn_transition`/`turn_transition_rejected`, `session_disconnected` (con `duration_seconds`/`turn_count`). Probado en `test_observability.py` y de punta a punta en `test_server_app.py::test_server_emits_structured_logs_with_session_correlation_id` (mismo `correlation_id` en las 4 etapas). **Falta:** latencia/confianza de STT y latencia de Claude — NFR-08 pide instrumentar esas etapas también, pero el servidor todavía no invoca STT/TTS/Claude (ver fila "Pipeline de audio real"), así que no hay nada real que instrumentar ahí todavía. |
 
 ## Frontend (Electron + React + Tailwind)
 
@@ -67,17 +67,19 @@ sigan `PENDING`.
 
 ## Próxima sesión de trabajo (sugerido, no comprometido)
 
-1. WSS/TLS delante del servidor (NFR-05) — cierra el gate de seguridad de auth junto con
-   ADR-0008 ya aceptado.
+1. Decidir dónde empieza el proyecto Electron+React+Tailwind (repo nuevo dentro de `apps/`,
+   estructura de carpetas, gestor de paquetes) — todavía no existe ni un scaffold, y es la
+   porción más grande de trabajo técnico que queda en Fase 1. Requiere decisiones de tooling
+   (npm/pnpm, Vite, TypeScript o no) que no están fijadas en ningún ADR todavía — candidato a
+   confirmar con el usuario antes de generar la estructura, no a asumir en silencio.
 2. Confirmar si el spike de Gate 0 (TODO-08) ya corrió fuera de este repo o sigue pendiente —
    condiciona si el protocolo de audio real (chunk size, punto de VAD) se puede empezar a
    diseñar, y si ADR-0004 (servidor LAN) sigue siendo la base correcta.
-3. Decidir dónde empieza el proyecto Electron+React+Tailwind (repo nuevo dentro de `apps/`,
-   estructura de carpetas, gestor de paquetes) — todavía no existe ni un scaffold. El cliente
-   necesita hablar el protocolo de eventos de turno que ya expone `server/app.py` (login →
-   WebSocket con `?token=`) para tener algo real contra qué integrar.
-4. NFR-09 (confianza de STT por segmento + confirmación de VIN/placa) — el fixture de test ya
-   documenta el gap exacto en `test_stt.py`.
+3. Timeout configurable explícito en `ClaudeDispatcher` (hoy depende del default del SDK) —
+   cierra del todo la fila "Manejo de error de Claude API" de la tabla de arriba.
+4. Cuando exista el pipeline de audio real: extender `log_event` a STT/Claude/TTS (latencia,
+   confianza por segmento) — `core/observability.py` ya está listo para eso, solo falta algo
+   real que instrumentar.
 
 ## Historial de sesiones de trabajo
 
@@ -93,3 +95,17 @@ sigan `PENDING`.
   dependencias nuevas (`uv add`). 42 tests en total, todos verdes. Se decidió explícitamente
   NO inventar el protocolo de audio binario (chunk/VAD) sin el dato del spike de Gate 0 — ver
   la fila "Pipeline de audio real" arriba.
+- **2026-08-19 (sesión 3, misma fecha, siguiente iteración):** WSS/TLS (NFR-05) —
+  `server/tls.py` genera un certificado autofirmado idempotente, `server_main.py` lo usa por
+  default (`DISABLE_TLS=1` como escape hatch explícito de desarrollo). Se agregó `cryptography`
+  como dependencia nueva (`uv add`). Se agregó `.gitignore` para `server.crt`/`server.key`/
+  `sessions.db` (nunca committear una clave privada o la base de sesiones). 49 tests en total,
+  todos verdes. **Nota:** se encontró `apps/voice-agent/recording.wav` borrado en el working
+  tree (aparece como `D` en `git status`) sin que ningún comando de esta sesión lo haya tocado
+  — reportado al usuario, no se restauró unilateralmente. También se confirmó que un hook de
+  gstack (`gstack-timeline-stop`) auto-commitea y pushea a `origin/master` al final de cada
+  turno — comportamiento esperado, confirmado por el usuario.
+- **2026-08-19 (sesión 4, misma fecha, siguiente iteración):** logging estructurado (NFR-08) —
+  `core/observability.py` (JSON por línea + `log_event` con `correlation_id` explícito),
+  cableado en `server/app.py` en las 4 etapas del ciclo de vida de una conexión (login, connect,
+  cada turno, disconnect). 54 tests en total, todos verdes. Sin dependencias nuevas.

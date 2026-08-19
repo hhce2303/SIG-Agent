@@ -137,3 +137,33 @@ def test_disconnecting_persists_the_session_record(client, app_components):
         {"event": "supervisor_started_speaking", "from": "listening", "to": "supervisor_speaking"}
     ]
     assert record.ended_at is not None
+
+
+def test_server_emits_structured_logs_with_session_correlation_id(client, caplog):
+    """NFR-08: logs estructurados con id de correlación por sesión, desde el login hasta la
+    desconexión — no solo "hay logs", sino que comparten el mismo `correlation_id`."""
+
+    with caplog.at_level("INFO", logger="voice_agent.server"):
+        body = _login(client).json()
+        session_id = body["session_id"]
+
+        with client.websocket_connect(f"/ws/session/{session_id}?token={body['token']}") as ws:
+            ws.send_json({"event": "supervisor_started_speaking"})
+            ws.receive_json()
+
+    events = {
+        record.message: record.fields
+        for record in caplog.records
+        if record.name == "voice_agent.server"
+    }
+
+    assert events["login_succeeded"]["correlation_id"] == session_id
+    assert events["session_connected"]["correlation_id"] == session_id
+    assert events["turn_transition"] == {
+        "correlation_id": session_id,
+        "event": "supervisor_started_speaking",
+        "from_state": "listening",
+        "to_state": "supervisor_speaking",
+    }
+    assert events["session_disconnected"]["correlation_id"] == session_id
+    assert events["session_disconnected"]["turn_count"] == 1

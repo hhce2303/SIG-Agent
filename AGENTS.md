@@ -45,12 +45,13 @@ como punto de entrada (`main.py`) — no el servidor async/VAD de Fase 1. Lo que
 el baseline original: el prototipo ya tiene puertos formales (`core/ports.py`, ADR-0006), manejo
 de error de Claude como estado de primera clase (reintento + recuperación en diálogo, NFR-02),
 adaptadores de persistencia (SQLite, ADR-0007) y auth (token propio, ADR-0008), una máquina de
-estados de turno completa (`core/turn_state.py`), **y ahora también un servidor FastAPI/
-WebSocket real** (`server/app.py` + `server_main.py`) que cablea todo lo anterior — login,
-handshake autenticado con scope por sesión, sincronización de eventos de turno, registro de
-sesión al desconectar. Lo que ese servidor todavía NO tiene: el pipeline de audio real
-(VAD/chunks — a propósito, ver PHASE1-PROGRESS.md) y WSS/TLS. Harness de tests real, 42 tests,
-ver `pytest.ini`. Ver [`PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md) para el
+estados de turno completa (`core/turn_state.py`), y un servidor FastAPI/WebSocket real
+(`server/app.py` + `server_main.py`) que cablea todo lo anterior — login, handshake autenticado
+con scope por sesión, sincronización de eventos de turno, registro de sesión al desconectar,
+**y WSS/TLS** (certificado autofirmado por default, `server/tls.py`). Lo que ese servidor
+todavía NO tiene: el pipeline de audio real (VAD/chunks — a propósito, ver
+PHASE1-PROGRESS.md) y logging estructurado (NFR-08). Harness de tests real, 49 tests, ver
+`pytest.ini`. Ver [`PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md) para el
 detalle ítem por ítem.
 Antes de extender este código, leer [ADR-0006](./docs/architecture/adr/0006-arquitectura-hexagonal.md):
 sigue siendo referencia de lógica de dominio (parámetros de STT/TTS, system prompt), no la base

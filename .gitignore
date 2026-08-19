@@ -2,3 +2,10 @@
 .venv
 
 .env
+
+# Artefactos generados por server_main.py (Fase 1, voice-agent) — nunca committear una clave
+# privada TLS ni la base de sesiones grabadas.
+apps/voice-agent/src/server.crt
+apps/voice-agent/src/server.key
+apps/voice-agent/src/sessions.db
+.pytest_cache/

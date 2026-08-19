@@ -69,6 +69,21 @@ def test_respond_raises_dispatcher_error_after_exhausting_retries(dispatcher):
     assert dispatcher.client.messages.create.call_count == 3
 
 
+def test_respond_system_prompt_instructs_confirming_unclear_critical_data(dispatcher):
+    """NFR-09: el system prompt debe decirle al dispatcher qué hacer con el marcador
+    `[unclear: ...]` que `WhisperSTT` deja en datos de baja confianza (ver `stt/whisper.py`)."""
+
+    dispatcher.client.messages.create.return_value = _response("Copy that.")
+
+    dispatcher.respond(conversation=[], scenario="s")
+
+    _, kwargs = dispatcher.client.messages.create.call_args
+    system_prompt = kwargs["system"]
+
+    assert "[unclear:" in system_prompt
+    assert "repeat" in system_prompt or "spell" in system_prompt
+
+
 def test_respond_does_not_retry_non_transient_errors(dispatcher):
     dispatcher.client.messages.create.side_effect = AuthenticationError(
         message="invalid api key",
