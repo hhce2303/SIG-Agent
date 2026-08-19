@@ -21,6 +21,9 @@ documento enlazado, el documento enlazado gana.
 7. [`docs/designs/police-call-training-simulator.md`](./docs/designs/police-call-training-simulator.md)
    y [`docs/designs/roadmap-3-fases.md`](./docs/designs/roadmap-3-fases.md) — el análisis
    completo de producto/premisas y el roadmap de 3 fases que originó los ADRs de este baseline.
+8. [`docs/architecture/PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md) — estado
+   real de cada ítem del checklist de cierre de Fase 1 (DONE/IN PROGRESS/BLOCKED), para no
+   volver a explorar el código desde cero cada sesión.
 
 ## Reglas arquitectónicas no negociables
 
@@ -37,12 +40,17 @@ documento enlazado, el documento enlazado gana.
 
 ## Estado del código vs. la documentación (importante)
 
-El código en `apps/voice-agent/src/` hoy es el **prototipo original** (CLI, push-to-talk, sin
-tests, sin manejo de error) — no la arquitectura de Fase 1 descrita en los ADRs. Antes de
-extender ese código directamente, leer [ADR-0006](./docs/architecture/adr/0006-arquitectura-hexagonal.md):
-el prototipo sirve como referencia de lógica (parámetros de STT/TTS, system prompt), no como
-base a extender tal cual — la revisión de ingeniería documentada en el design doc de origen
-detalla exactamente qué sobrevive y qué no.
+El código en `apps/voice-agent/src/` sigue siendo el **CLI push-to-talk del prototipo original**
+como punto de entrada (`main.py`) — no el servidor async/VAD de Fase 1. Lo que sí cambió desde
+el baseline original: el prototipo ya tiene puertos formales (`core/ports.py`, ADR-0006), manejo
+de error de Claude como estado de primera clase (reintento + recuperación en diálogo, NFR-02),
+adaptadores de persistencia (SQLite, ADR-0007) y auth (token propio, ADR-0008) probados de forma
+aislada, una máquina de estados de turno completa (`core/turn_state.py`), y un harness de tests
+real (34 tests, ver `pytest.ini`) — ver
+[`PHASE1-PROGRESS.md`](./docs/architecture/PHASE1-PROGRESS.md) para el detalle ítem por ítem.
+Antes de extender este código, leer [ADR-0006](./docs/architecture/adr/0006-arquitectura-hexagonal.md):
+sigue siendo referencia de lógica de dominio (parámetros de STT/TTS, system prompt), no la base
+del servidor de Fase 1 — el core async/WebSocket todavía no existe.
 
 ## Módulos de documentación activos en este repo
 

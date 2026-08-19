@@ -6,16 +6,23 @@ reordenan ni se borran — un TODO resuelto queda marcado, no desaparece.
 ## Bloqueantes de Fase 1
 
 ### TODO-01
-**Motor de persistencia.** Estado: PENDING.
+**Motor de persistencia.** Estado: IN PROGRESS.
 No existe hoy ninguna capa de storage (escenarios, métricas, historial son greenfield — ver
 [ADR-0006](./adr/0006-arquitectura-hexagonal.md)). Elegir motor (SQLite/Postgres/otro) es un
-ADR pendiente de escribir, no un detalle de implementación.
+ADR pendiente de escribir, no un detalle de implementación. **Actualización 2026-08-19:**
+[ADR-0007](./adr/0007-motor-de-persistencia.md) (SQLite embebido) — `accepted` por el usuario.
+Queda IN PROGRESS (no RESOLVED) hasta que el adaptador esté implementado y en uso por el
+servidor real, no solo decidido.
 
 ### TODO-02
-**Mecanismo de autenticación de supervisores.** Estado: PENDING.
+**Mecanismo de autenticación de supervisores.** Estado: IN PROGRESS.
 ¿Hay un directorio/SSO corporativo existente para integrar, o se necesita uno propio? Sin
 dueño nombrado. Relacionado: [NFR-04](./nfr.md#nfr-04). Bloqueante antes de fusionar código de
-servidor según la revisión de ingeniería de `/autoplan`.
+servidor según la revisión de ingeniería de `/autoplan`. **Actualización 2026-08-19:**
+[ADR-0008](./adr/0008-mecanismo-de-autenticacion-de-sesion.md) (token de sesión propio, sin
+asumir SSO corporativo) — `accepted` por el usuario. Sigue IN PROGRESS: falta implementar y
+usar el adaptador en el servidor real, y la pregunta de si existe además un SSO corporativo
+real sigue sin dueño y sigue abierta (no bloquea este mecanismo, ver ADR-0008).
 
 ### TODO-03
 **Dueño operativo de la caja RTX.** Estado: PENDING.

@@ -3,8 +3,10 @@ import numpy as np
 
 from kokoro import KPipeline
 
+from core.ports import TextToSpeechPort
 
-class KokoroTTS:
+
+class KokoroTTS(TextToSpeechPort):
     def __init__(
         self,
         voice: str = "af_heart",

@@ -1,7 +1,9 @@
 from faster_whisper import WhisperModel
 
+from core.ports import SpeechToTextPort
 
-class WhisperSTT:
+
+class WhisperSTT(SpeechToTextPort):
 
     def __init__(
         self,
