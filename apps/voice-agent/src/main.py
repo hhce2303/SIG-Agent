@@ -29,7 +29,7 @@ stt = WhisperSTT(
 tts = KokoroTTS(
     voice=os.getenv(
         "KOKORO_VOICE",
-        "af_heart",
+        "am_michael",
     )
 )
 

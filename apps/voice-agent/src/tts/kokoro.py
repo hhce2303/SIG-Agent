@@ -9,11 +9,14 @@ from core.ports import TextToSpeechPort
 class KokoroTTS(TextToSpeechPort):
     def __init__(
         self,
-        voice: str = "af_heart",
+        voice: str = "am_michael",
         lang_code: str = "a",
         sample_rate: int = 24000,
     ):
-        self.pipeline = KPipeline(lang_code=lang_code)
+        self.pipeline = KPipeline(
+            lang_code=lang_code,
+            repo_id="hexgrad/Kokoro-82M",
+        )
         self.voice = voice
         self.sample_rate = sample_rate
 
