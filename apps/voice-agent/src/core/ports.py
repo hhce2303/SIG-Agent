@@ -79,6 +79,14 @@ class CriticalDataPoint:
     key: str
     label: str
     required: bool = True
+    # TODO-17 (docs/architecture/TODOS.md): `label` es una etiqueta de UI ("Vehicle
+    # description"), no vocabulario que un reporte en lenguaje natural repita — el matching por
+    # palabra clave contra el label solo puntuó 17/100 un reporte real perfecto. `match_hints`
+    # son frases de CONTENIDO que quien autora el escenario espera escuchar de verdad (ej.
+    # ["toyota camry", "camry", "sedan"] para "Vehicle description") — opcional, retrocompatible
+    # (default vacío = mismo comportamiento que antes de este campo), pero se recomienda
+    # completarlo para cualquier escenario nuevo. Ver `core/scoring.py::_matches_point`.
+    match_hints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -111,6 +119,62 @@ class SettingsPort(Protocol):
         ...
 
     def set_tts_voice(self, voice: str) -> None:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Escenarios de video — ver docs/designs/escenarios-de-video.md (autoplan 2026-08-21) y
+# ADR-0009/ADR-0010. `Scenario` queda SIN CAMBIOS a propósito (ver hallazgo de ingeniería 1.1/1.2
+# de esa revisión): la tabla `scenarios` ya tiene datos reales de Gate 0 y `CREATE TABLE IF NOT
+# EXISTS` es un no-op contra una tabla existente (TODO-20) — cualquier dato nuevo de video vive
+# en una tabla propia (`scenario_videos`), nunca en una columna agregada a `scenarios`.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class VideoGroundTruthPoint:
+    """Un hecho verificable dentro del video (ADR-0010) — no reusa `CriticalDataPoint` porque
+    necesita un rango de tiempo visible y vive en un `ScenarioVideo`, no en un `Scenario`.
+    `match_hints` es obligatorio en la práctica (ver ADR-0010, Negative) aunque no a nivel de
+    tipo — el editor de escenarios de video debe exigirlo en la UI, no solo en el dataclass.
+    """
+
+    key: str
+    label: str
+    match_hints: list[str] = field(default_factory=list)
+    visible_from_seconds: float = 0.0
+    visible_to_seconds: float = 0.0
+    required: bool = True
+
+
+@dataclass
+class ScenarioVideo:
+    """El video adjunto a un `Scenario` (relación 1:1, PK = scenario_id — ver
+    `SQLiteScenarioVideoStore`). `video_checksum` liga el ground truth a un archivo específico:
+    si alguien reemplaza el archivo en `video_path` sin volver a autorar el ground truth, el
+    checksum ya no coincide y `verify_checksum()` (adaptador) lo puede detectar en vez de fallar
+    en silencio con timestamps desincronizados.
+    """
+
+    scenario_id: str
+    video_path: str
+    video_checksum: str
+    duration_seconds: float
+    content_type: str
+    ground_truth_points: list[VideoGroundTruthPoint] = field(default_factory=list)
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
+@runtime_checkable
+class ScenarioVideoPort(Protocol):
+    def get(self, scenario_id: str) -> ScenarioVideo | None:
+        ...
+
+    def upsert(self, video: ScenarioVideo) -> None:
+        ...
+
+    def delete(self, scenario_id: str) -> None:
         ...
 
 
@@ -201,14 +265,49 @@ class SessionTokenClaims:
     supervisor_id: str
     session_id: str
     issued_at: float
+    # ADR-0011 (gate de rol mínimo para video de incidentes reales, TODO-16 acotado): default
+    # "supervisor" preserva el comportamiento de cada token ya emitido antes de este campo —
+    # nadie se vuelve manager por accidente. Solo `login()` con `MANAGER_PASSPHRASE` produce
+    # `"manager"`.
+    role: str = "supervisor"
 
 
 @runtime_checkable
 class SessionTokenPort(Protocol):
-    def issue(self, supervisor_id: str, session_id: str) -> str:
+    def issue(self, supervisor_id: str, session_id: str, role: str = "supervisor") -> str:
         ...
 
     def verify(self, token: str) -> SessionTokenClaims:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Auth de streaming de video — ver ADR-0009. Puerto separado de `SessionTokenPort` a propósito
+# (no reusar `SessionTokenClaims`/`session_id` — un token de video no representa una sesión de
+# llamada, representa acceso de corta duración a UN escenario específico): mismo tipo de
+# conflación que ADR-0010/hallazgo 1.1 evita para `CriticalDataPoint` vs. `VideoGroundTruthPoint`.
+# ---------------------------------------------------------------------------
+
+
+class InvalidVideoTokenError(Exception):
+    """Token de streaming de video ausente, corrupto, con firma inválida, expirado, o emitido
+    para un `scenario_id` distinto del que se está pidiendo (ver `verify`).
+    """
+
+
+@dataclass(frozen=True)
+class VideoTokenClaims:
+    scenario_id: str
+    supervisor_id: str
+    issued_at: float
+
+
+@runtime_checkable
+class VideoTokenPort(Protocol):
+    def issue(self, scenario_id: str, supervisor_id: str) -> str:
+        ...
+
+    def verify(self, token: str, scenario_id: str) -> VideoTokenClaims:
         ...
 
 

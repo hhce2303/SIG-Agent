@@ -3,7 +3,9 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import Header from '../components/Header'
+import PreCallVideoGate from '../components/PreCallVideoGate'
 import Waveform from '../components/Waveform'
+import { httpBaseFrom } from '../lib/api'
 import { useEngineStore } from '../stores/engineStore'
 
 export default function CallPage() {
@@ -13,7 +15,34 @@ export default function CallPage() {
     connection, callStatus, dispatcherSpeaking, operatorSpeaking, recording,
     activeScenario, transcript, lastSession, error, warning, engineActivity,
     toggleRecording, pause, resume, endCall, clearNotice,
+    scenarios, selectedScenarioId, bridgeUrl, videoAccess, videoAccessLoading,
+    loadVideoAccess, notifyVideoEnded, clearVideoAccess, startCall,
   } = useEngineStore()
+
+  // Escenarios de video (docs/designs/escenarios-de-video.md): un solo lugar decide cuándo se
+  // manda `call.start` — ni HomePage.tsx ni ScenariosPage.tsx lo hacen más (hallazgo de diseño
+  // #1). `gateResolved` es "ya sabemos si hay video que mostrar, o no" — antes de saberlo no se
+  // manda `call.start` ni se muestra nada, para no parpadear entre estados.
+  const [gateResolved, setGateResolved] = useState(false)
+  const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId)
+
+  useEffect(() => {
+    // `gateResolved` es estado de ESTE montaje de CallPage (se resetea solo — cada llamada
+    // nueva navega away y de vuelta, remontando el componente) — no depende de `callStatus`,
+    // que después de completar una llamada queda en `"completed"`, no vuelve a `"idle"` por sí
+    // solo (`startCall()` lo pisa directo a `"connecting"` la próxima vez).
+    if (gateResolved) return
+
+    let cancelled = false
+    ;(async () => {
+      const access = selectedScenario?.has_video ? await loadVideoAccess(selectedScenarioId) : null
+      if (cancelled) return
+      setGateResolved(true)
+      if (!access) startCall()  // hallazgo de diseño #2: sin video, seguir directo al flujo de hoy
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedScenarioId])
 
   useEffect(() => {
     if (callStatus !== 'connected') return
@@ -24,6 +53,29 @@ export default function CallPage() {
   useEffect(() => {
     if (lastSession?.status === 'completed') navigate('/review')
   }, [lastSession, navigate])
+
+  if (videoAccess) {
+    return (
+      <PreCallVideoGate
+        scenarioTitle={selectedScenario?.title ?? 'Training Session'}
+        streamUrl={`${httpBaseFrom(bridgeUrl)}${videoAccess.stream_url}`}
+        onVideoEnded={() => notifyVideoEnded(selectedScenarioId)}
+        onStartCall={() => { clearVideoAccess(); startCall() }}
+      />
+    )
+  }
+
+  if (!gateResolved || videoAccessLoading) {
+    // Sin precedente de loading-state para media en este código (hallazgo de diseño #3) — un
+    // spinner real sobre el mismo layout de siempre, nunca una pantalla en blanco que se lea
+    // como colgada.
+    return (
+      <div className="call-screen">
+        <Header center={<div className="session-live"><AudioLines size={22} /><strong>{selectedScenario?.title ?? 'Training Session'}</strong></div>} />
+        <main className="call-main"><section className="call-card panel"><p className="empty-copy">Preparing your session…</p></section></main>
+      </div>
+    )
+  }
 
   const time = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
   const connecting = callStatus === 'connecting'

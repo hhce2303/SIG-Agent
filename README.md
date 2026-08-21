@@ -18,20 +18,36 @@ SIG-Agent-Backend/
 El contrato que debe implementar el backend está en
 `frontend/BACKEND_REQUIREMENTS.md`.
 
-## Backend
-
-Requisitos: Python 3.12, uv, micrófono y altavoces.
+## Desarrollo local (backend + frontend juntos)
 
 ```powershell
-Copy-Item .env.example .env
-# Configura las variables privadas solamente en el .env de la raíz.
-uv sync
-uv run python apps/voice-agent/src/server.py
+.\dev-up.ps1
 ```
 
-El servicio escucha de forma predeterminada en `ws://127.0.0.1:8765`.
+Levanta el backend real (`apps/voice-agent/src/server_main.py` — Whisper + Claude API + Kokoro
++ micrófono, sin stubs) y el frontend real (Electron + Vite) cada uno en su propia ventana de
+PowerShell, con WSS/TLS real por default (certificado autofirmado, ver NFR-05). Requiere que el
+`.env` de la raíz ya tenga `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `SESSION_TOKEN_SECRET` y
+`SUPERVISOR_PASSPHRASE` (ver [ADR-0008](docs/architecture/adr/0008-mecanismo-de-autenticacion-de-sesion.md)).
+`.\dev-up.ps1 -DisableTls` corre en texto plano solo para debug local;
+`.\dev-up.ps1 -Stop` detiene ambos servicios. Ver comentarios del script para el detalle.
 
-## Frontend
+## Backend (manual, sin el script)
+
+Requisitos: Python 3.12, `uv`, micrófono y altavoces.
+
+```powershell
+uv sync
+cd apps/voice-agent/src
+python server_main.py
+```
+
+El servicio escucha en `wss://127.0.0.1:8000` por default (`DISABLE_TLS=1` para texto plano en
+desarrollo local). El punto de entrada real es `server_main.py`, no un `server.py` a nivel de
+`apps/voice-agent/src` — ver [AGENTS.md](AGENTS.md) para el estado real del código vs. la
+documentación de cada fase.
+
+## Frontend (manual, sin el script)
 
 Requisitos: Node.js 20 o superior y npm.
 
@@ -49,10 +65,12 @@ compilación y empaquetado.
 ## Validación
 
 ```powershell
-python -m unittest discover -s apps/voice-agent/tests -v
-cd frontend
+cd apps/voice-agent
+uv run pytest -q
+cd ../../frontend
 npm run build
 ```
 
-Los datos de sesiones se guardan bajo `data/`, que está excluido del control de
-versiones. Los secretos permanecen en el `.env` raíz, también excluido.
+Los secretos viven en el `.env` de la raíz (excluido de git). La sesión SQLite real se guarda
+en `apps/voice-agent/src/sessions.db` (también excluido) — ver
+[ADR-0007](docs/architecture/adr/0007-motor-de-persistencia.md).

@@ -40,10 +40,15 @@ class VoiceConversation:
         text = self.stt.transcribe(audio_path)
 
         if not text:
-            print("⚠️ No speech detected.")
+            # Sin emoji a propósito (encontrado en una sesión de pruebas reales): la consola de
+            # Windows en su codepage por default (cp1252) no puede codificar estos caracteres y
+            # el `print` tumbaba el turno con UnicodeEncodeError — riesgo directo para NFR-03
+            # (este CLI es el fallback manual si el servidor LAN cae, tiene que funcionar en
+            # Windows sin configuración especial de consola).
+            print("No speech detected.")
             return
 
-        print(f"\n📝 You: {text}")
+        print(f"\nYou: {text}")
 
         self.conversation.append({
             "role": "user",
@@ -62,7 +67,7 @@ class VoiceConversation:
         except DispatcherError as error:
             # NFR-02: un error de la API de Claude no puede tumbar el turno en silencio — se
             # recupera en el propio diálogo en vez de propagar la excepción.
-            print(f"⚠️ Dispatcher error: {error}")
+            print(f"Dispatcher error: {error}")
             response = DISPATCHER_RECOVERY_LINE
 
         self.conversation.append({
@@ -70,7 +75,7 @@ class VoiceConversation:
             "content": response,
         })
 
-        print(f"\n🚓 Dispatcher: {response}")
+        print(f"\nDispatcher: {response}")
 
         # -------------------------
         # 4. Text → Speech

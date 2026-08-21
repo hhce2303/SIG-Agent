@@ -2,7 +2,16 @@
 // WebSocket, ver `voiceBridge.ts`); login (ADR-0008) y el CRUD de escenarios/ajustes viven en
 // REST en el backend real, así que esto es nuevo, no una extensión de algo existente.
 
-import type { ImpactReport, IncidentInput, IncidentOutcome, ScenarioDetail, ScenarioInput } from '../types'
+import type {
+  ImpactReport,
+  IncidentInput,
+  IncidentOutcome,
+  ScenarioDetail,
+  ScenarioInput,
+  ScenarioVideoAccess,
+  ScenarioVideoDetail,
+  ScenarioVideoInput,
+} from '../types'
 
 export function httpBaseFrom(wsUrl: string): string {
   return wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
@@ -32,11 +41,14 @@ async function request<T>(url: string, options: RequestInit = {}, token?: string
 }
 
 export async function login(httpBase: string, supervisorId: string, passphrase: string) {
-  const body = await request<{ session_id: string; token: string }>(`${httpBase}/auth/login`, {
+  const body = await request<{ session_id: string; token: string; role: string }>(`${httpBase}/auth/login`, {
     method: 'POST',
     body: JSON.stringify({ supervisor_id: supervisorId, passphrase }),
   })
-  return { sessionId: body.session_id, token: body.token }
+  // ADR-0011 — `role` es solo una pista de UI (mostrar/ocultar controles de manager); la
+  // aplicación real vive en el servidor, que re-deriva el rol del token, no de lo que mande
+  // este cliente de vuelta.
+  return { sessionId: body.session_id, token: body.token, role: body.role }
 }
 
 export function listScenarios(httpBase: string, token: string) {
@@ -65,6 +77,72 @@ export function updateScenario(httpBase: string, token: string, id: string, scen
 
 export function deleteScenario(httpBase: string, token: string, id: string) {
   return request<void>(`${httpBase}/scenarios/${id}`, { method: 'DELETE' }, token)
+}
+
+// Escenarios de video — docs/designs/escenarios-de-video.md, ADR-0009/ADR-0010. `null` (no una
+// excepción) cuando el escenario simplemente no tiene video adjunto (404) — ese es el estado
+// por default de la mayoría de los escenarios hoy, y el caller (gate pre-llamada) debe seguir
+// directo al flujo de hoy sin tratarlo como un error (hallazgo de diseño: el estado vacío es el
+// más importante de no romper).
+export async function getScenarioVideoAccess(
+  httpBase: string,
+  token: string,
+  id: string,
+): Promise<ScenarioVideoAccess | null> {
+  try {
+    return await request<ScenarioVideoAccess>(`${httpBase}/scenarios/${id}/video`, {}, token)
+  } catch {
+    return null
+  }
+}
+
+export function getScenarioVideoGroundTruth(httpBase: string, token: string, id: string) {
+  return request<ScenarioVideoDetail>(`${httpBase}/scenarios/${id}/video/ground-truth`, {}, token)
+}
+
+export function putScenarioVideo(httpBase: string, token: string, id: string, video: ScenarioVideoInput) {
+  return request<ScenarioVideoDetail>(
+    `${httpBase}/scenarios/${id}/video`,
+    { method: 'PUT', body: JSON.stringify(video) },
+    token,
+  )
+}
+
+export function deleteScenarioVideo(httpBase: string, token: string, id: string) {
+  return request<void>(`${httpBase}/scenarios/${id}/video`, { method: 'DELETE' }, token)
+}
+
+// ADR-0012 — sube el archivo real en vez de pedir una ruta ya colocada en el disco del
+// servidor (v1). No usa `request()`: un `FormData` necesita que el navegador ponga su propio
+// `Content-Type: multipart/form-data; boundary=...`, poner el header a mano lo rompe.
+//
+// Deliberadamente NO tiene un `scenarioId` — el archivo no pertenece a ningún escenario todavía
+// en el momento de subirlo (dos callers lo usan: `ScenarioEditorPage.tsx` para un escenario ya
+// creado vía `PUT /scenarios/{id}/video`, e `ImpactPage.tsx` para uno que recién se crea en la
+// misma llamada de `promote-to-scenario`).
+export type ScenarioVideoUpload = {
+  video_path: string
+  video_checksum: string
+  duration_seconds: number | null
+  content_type: string
+}
+
+export async function uploadVideo(httpBase: string, token: string, file: File): Promise<ScenarioVideoUpload> {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await fetch(`${httpBase}/videos/upload`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => undefined)
+    throw new Error(body?.detail ?? `Upload failed (${response.status})`)
+  }
+
+  return (await response.json()) as ScenarioVideoUpload
 }
 
 export function getSettings(httpBase: string, token: string) {
@@ -96,8 +174,19 @@ export function deleteIncident(httpBase: string, token: string, id: string) {
   return request<void>(`${httpBase}/incidents/${id}`, { method: 'DELETE' }, token)
 }
 
-export function promoteIncidentToScenario(httpBase: string, token: string, id: string) {
-  return request<ScenarioDetail>(`${httpBase}/incidents/${id}/promote-to-scenario`, { method: 'POST' }, token)
+export function promoteIncidentToScenario(
+  httpBase: string,
+  token: string,
+  id: string,
+  video?: ScenarioVideoInput,
+) {
+  // ADR-0011: adjuntar `video` exige role=="manager" en el backend — el 403 se propaga tal
+  // cual (mismo `request()` de siempre), este cliente no decide quién puede hacer qué.
+  return request<ScenarioDetail>(
+    `${httpBase}/incidents/${id}/promote-to-scenario`,
+    { method: 'POST', body: JSON.stringify(video ? { video } : {}) },
+    token,
+  )
 }
 
 export function getImpactReport(httpBase: string, token: string) {

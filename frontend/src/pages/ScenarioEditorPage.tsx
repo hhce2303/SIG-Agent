@@ -1,10 +1,20 @@
-import { AlertCircle, ArrowLeft, Plus, Save, Trash2 } from 'lucide-react'
-import { FormEvent, useEffect, useState } from 'react'
+import { AlertCircle, ArrowLeft, Film, Plus, Save, Trash2, Upload, X } from 'lucide-react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import AppShell from '../components/AppShell'
-import { createScenario, deleteScenario, getScenario, httpBaseFrom, updateScenario } from '../lib/api'
+import {
+  createScenario,
+  deleteScenario,
+  deleteScenarioVideo,
+  getScenario,
+  getScenarioVideoGroundTruth,
+  httpBaseFrom,
+  putScenarioVideo,
+  updateScenario,
+  uploadVideo,
+} from '../lib/api'
 import { useEngineStore } from '../stores/engineStore'
-import type { CriticalDataPointDef, ScenarioInput } from '../types'
+import type { CriticalDataPointDef, ScenarioInput, VideoGroundTruthPointDef } from '../types'
 
 const EMPTY_SCENARIO: ScenarioInput = {
   title: '',
@@ -13,7 +23,17 @@ const EMPTY_SCENARIO: ScenarioInput = {
   language: 'English',
   description: '',
   briefing: '',
-  critical_data_points: [{ key: '', label: '', required: true }],
+  critical_data_points: [{ key: '', label: '', required: true, match_hints: [] }],
+}
+
+const EMPTY_GROUND_TRUTH_POINT: VideoGroundTruthPointDef = {
+  key: '', label: '', match_hints: [], visible_from_seconds: 0, visible_to_seconds: 0, required: true,
+}
+
+// TODO-17: los hints se editan como texto separado por comas — más simple que un chip-input
+// para un manager no-técnico, y es lo mismo que `core/scoring.py::_matches_point` necesita.
+function parseHints(text: string): string[] {
+  return text.split(',').map((hint) => hint.trim()).filter(Boolean)
 }
 
 // Fase 2 (roadmap, TODO-11 resuelto): editor con campos estructurados guiados + una narrativa
@@ -32,6 +52,19 @@ export default function ScenarioEditorPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string>()
 
+  // Escenarios de video (docs/designs/escenarios-de-video.md) — solo tiene sentido una vez que
+  // el escenario ya existe (PUT /scenarios/{id}/video necesita un scenario_id real), así que
+  // esta sección entera queda oculta en modo "New Scenario" hasta guardar por primera vez.
+  const [hasVideo, setHasVideo] = useState(false)
+  const [videoPath, setVideoPath] = useState('')
+  const [videoDuration, setVideoDuration] = useState(0)
+  const [groundTruthPoints, setGroundTruthPoints] = useState<VideoGroundTruthPointDef[]>([EMPTY_GROUND_TRUTH_POINT])
+  const [videoSaving, setVideoSaving] = useState(false)
+  const [videoError, setVideoError] = useState<string>()
+  const [uploading, setUploading] = useState(false)
+  const [uploadedFileName, setUploadedFileName] = useState<string>()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   useEffect(() => {
     if (!isEditing || !authToken) return
     getScenario(httpBase, authToken, scenarioId!)
@@ -48,6 +81,18 @@ export default function ScenarioEditorPage() {
       .finally(() => setLoading(false))
   }, [isEditing, scenarioId, authToken, httpBase])
 
+  useEffect(() => {
+    if (!isEditing || !authToken) return
+    getScenarioVideoGroundTruth(httpBase, authToken, scenarioId!)
+      .then((video) => {
+        setHasVideo(true)
+        setVideoPath(video.video_path)
+        setVideoDuration(video.duration_seconds)
+        setGroundTruthPoints(video.ground_truth_points.length ? video.ground_truth_points : [EMPTY_GROUND_TRUTH_POINT])
+      })
+      .catch(() => setHasVideo(false))  // 404 = sin video todavía, no es un error real que mostrar
+  }, [isEditing, scenarioId, authToken, httpBase])
+
   const updatePoint = (index: number, patch: Partial<CriticalDataPointDef>) => {
     setForm((state) => ({
       ...state,
@@ -57,7 +102,7 @@ export default function ScenarioEditorPage() {
 
   const addPoint = () => setForm((state) => ({
     ...state,
-    critical_data_points: [...state.critical_data_points, { key: '', label: '', required: true }],
+    critical_data_points: [...state.critical_data_points, { key: '', label: '', required: true, match_hints: [] }],
   }))
 
   const removePoint = (index: number) => setForm((state) => ({
@@ -94,6 +139,67 @@ export default function ScenarioEditorPage() {
     await deleteScenario(httpBase, authToken, scenarioId)
     refreshScenarios()
     navigate('/scenarios')
+  }
+
+  const updateGroundTruthPoint = (index: number, patch: Partial<VideoGroundTruthPointDef>) => {
+    setGroundTruthPoints((points) => points.map((point, i) => (i === index ? { ...point, ...patch } : point)))
+  }
+  const addGroundTruthPoint = () => setGroundTruthPoints((points) => [...points, EMPTY_GROUND_TRUTH_POINT])
+  const removeGroundTruthPoint = (index: number) => setGroundTruthPoints((points) => points.filter((_, i) => i !== index))
+
+  // ADR-0012 — sube el archivo real en vez de pedir una ruta ya colocada en el disco del
+  // servidor. Solo llena los campos del formulario que ya existía (v1); "Attach video" abajo
+  // sigue siendo el paso que efectivamente guarda el ground truth.
+  const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file || !authToken) return
+    setUploading(true)
+    setVideoError(undefined)
+    try {
+      const uploaded = await uploadVideo(httpBase, authToken, file)
+      setVideoPath(uploaded.video_path)
+      if (uploaded.duration_seconds != null) setVideoDuration(uploaded.duration_seconds)
+      setUploadedFileName(file.name)
+    } catch (err) {
+      setVideoError(err instanceof Error ? err.message : 'Failed to upload video.')
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const saveVideo = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!authToken || !scenarioId) return
+    setVideoSaving(true)
+    setVideoError(undefined)
+    try {
+      await putScenarioVideo(httpBase, authToken, scenarioId, {
+        video_path: videoPath.trim(),
+        duration_seconds: videoDuration,
+        content_type: 'video/mp4',
+        ground_truth_points: groundTruthPoints
+          .filter((point) => point.key.trim() && point.label.trim())
+          .map((point) => ({ ...point, key: point.key.trim(), label: point.label.trim() })),
+      })
+      setHasVideo(true)
+      refreshScenarios()  // el picker de Home/Scenarios necesita el `has_video` fresco
+    } catch (err) {
+      setVideoError(err instanceof Error ? err.message : 'Failed to attach video.')
+    } finally {
+      setVideoSaving(false)
+    }
+  }
+
+  const removeVideo = async () => {
+    if (!authToken || !scenarioId) return
+    if (!window.confirm('Remove this video from the scenario? The trainee will get the text-only flow instead.')) return
+    await deleteScenarioVideo(httpBase, authToken, scenarioId)
+    setHasVideo(false)
+    setVideoPath('')
+    setVideoDuration(0)
+    setGroundTruthPoints([EMPTY_GROUND_TRUTH_POINT])
+    refreshScenarios()
   }
 
   if (loading) return <AppShell active="Scenarios"><p className="empty-copy">Loading scenario…</p></AppShell>
@@ -145,16 +251,96 @@ export default function ScenarioEditorPage() {
               <div className="scenario-point-row" key={index}>
                 <input placeholder="key (e.g. license_plate)" value={point.key} onChange={(e) => updatePoint(index, { key: e.target.value })} />
                 <input placeholder="label shown to the trainee (e.g. License plate)" value={point.label} onChange={(e) => updatePoint(index, { label: e.target.value })} />
+                <input
+                  placeholder="match hints — real phrases, comma-separated (e.g. toyota camry, camry)"
+                  className="scenario-point-hints"
+                  value={point.match_hints.join(', ')}
+                  onChange={(e) => updatePoint(index, { match_hints: parseHints(e.target.value) })}
+                  title="TODO-17: the label alone rarely appears in natural speech — list the real words/phrases a trainee would actually say"
+                />
                 <label className="scenario-point-required"><input type="checkbox" checked={point.required} onChange={(e) => updatePoint(index, { required: e.target.checked })} />Required</label>
                 <button type="button" className="secondary-button" onClick={() => removePoint(index)}><Trash2 size={15} /></button>
               </div>
             ))}
           </div>
+          <p className="scenario-editor-hint">Match hints should be the real words a trainee would say (e.g. "toyota camry"), not the label itself — scoring compares against these, not the label text.</p>
 
           <div className="page-actions">
             <button className="blue-button" type="submit" disabled={saving}><Save size={17} />{saving ? 'Saving…' : 'Save scenario'}</button>
           </div>
         </form>
+
+        {isEditing && (
+          <form className="panel settings-form scenario-editor-form scenario-video-form" onSubmit={saveVideo}>
+            <div className="scenario-points-header">
+              <span className="scenario-video-heading"><Film size={17} />Video scenario (optional)</span>
+              {hasVideo && <button type="button" className="secondary-button" onClick={removeVideo}><X size={15} />Remove video</button>}
+            </div>
+            <p className="scenario-editor-hint">
+              Attach a video clip — the trainee watches it before the call instead of just reading the briefing above, then reports what they saw. Ground truth points below are what the trainee is scored against; the briefing above still drives the dispatcher's side of the conversation.
+            </p>
+
+            {videoError && <div className="call-notice error scenario-editor-error"><AlertCircle size={16} /><span>{videoError}</span></div>}
+
+            <div className="video-upload-row">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="video/mp4,video/quicktime,.mp4,.mov,.m4v"
+                id="scenario-video-upload"
+                className="video-upload-input"
+                onChange={handleUpload}
+                disabled={uploading}
+              />
+              <label htmlFor="scenario-video-upload" className="secondary-button video-upload-label">
+                <Upload size={16} />{uploading ? 'Uploading…' : 'Choose video file to upload'}
+              </label>
+              {uploadedFileName && !uploading && <span className="video-upload-filename">✓ {uploadedFileName}</span>}
+            </div>
+            <p className="scenario-editor-hint">Uploads to this server (ADR-0012) — no need for anyone to place files on disk by hand. MP4/MOV, up to the server's configured size limit.</p>
+
+            <div className="scenario-editor-grid">
+              <label><span>Video file path {uploadedFileName ? '(filled in automatically after upload)' : '(or type a path already on the server)'}</span>
+                <input placeholder="C:/videos/robbery_001.mp4" value={videoPath} onChange={(e) => setVideoPath(e.target.value)} required />
+              </label>
+              <label><span>Duration (seconds) {uploadedFileName && videoDuration ? '(auto-detected)' : ''}</span>
+                <input type="number" min={1} step="0.1" value={videoDuration || ''} onChange={(e) => setVideoDuration(Number(e.target.value))} required />
+              </label>
+            </div>
+
+            <div className="scenario-points-header">
+              <span>Ground truth — what's actually visible in the video (scored, not sent to the dispatcher)</span>
+              <button type="button" className="secondary-button" onClick={addGroundTruthPoint}><Plus size={16} />Add</button>
+            </div>
+            <div className="scenario-points-list">
+              {groundTruthPoints.map((point, index) => (
+                <div className="scenario-point-row video-ground-truth-row" key={index}>
+                  <input placeholder="key (e.g. suspect_clothing)" value={point.key} onChange={(e) => updateGroundTruthPoint(index, { key: e.target.value })} />
+                  <input placeholder="label (e.g. Suspect clothing)" value={point.label} onChange={(e) => updateGroundTruthPoint(index, { label: e.target.value })} />
+                  <input
+                    placeholder="match hints — real phrases (e.g. red jacket, hoodie)"
+                    className="scenario-point-hints"
+                    value={point.match_hints.join(', ')}
+                    onChange={(e) => updateGroundTruthPoint(index, { match_hints: parseHints(e.target.value) })}
+                  />
+                  <label className="scenario-point-visible-at">
+                    <span>Visible from</span>
+                    <input type="number" min={0} step="0.5" value={point.visible_from_seconds} onChange={(e) => updateGroundTruthPoint(index, { visible_from_seconds: Number(e.target.value) })} />
+                    <span>to</span>
+                    <input type="number" min={0} step="0.5" value={point.visible_to_seconds} onChange={(e) => updateGroundTruthPoint(index, { visible_to_seconds: Number(e.target.value) })} />
+                  </label>
+                  <label className="scenario-point-required"><input type="checkbox" checked={point.required} onChange={(e) => updateGroundTruthPoint(index, { required: e.target.checked })} />Required</label>
+                  <button type="button" className="secondary-button" onClick={() => removeGroundTruthPoint(index)}><Trash2 size={15} /></button>
+                </div>
+              ))}
+            </div>
+            <p className="scenario-editor-hint">Every ground truth point needs at least one match hint — the label alone won't score correctly (same TODO-17 fix as above).</p>
+
+            <div className="page-actions">
+              <button className="blue-button" type="submit" disabled={videoSaving}><Save size={17} />{videoSaving ? 'Saving…' : hasVideo ? 'Update video' : 'Attach video'}</button>
+            </div>
+          </form>
+        )}
       </div>
     </AppShell>
   )

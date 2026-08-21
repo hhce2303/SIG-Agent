@@ -137,6 +137,19 @@ h1,h2,h3,p { margin: 0; }
 .call-notice span { flex:1; }
 .call-notice button { border:0; background:transparent; cursor:pointer; font-size:22px; }
 .latest-prompt { color:#b9c9d8; font-size:13px; line-height:1.5; width:min(780px,85%); margin-top:17px; text-align:center; }
+
+/* Escenarios de video — docs/designs/escenarios-de-video.md. Mismo grid/tema que .call-screen,
+   sin la fila de footer de 150px (este gate no tiene controles de llamada todavía). */
+.pre-call-video-gate { grid-template-rows:98px minmax(0,1fr); }
+.video-gate-card { gap:14px; }
+.video-gate-eyebrow { color:#5aa4ff; font-size:13px; letter-spacing:.5px; text-transform:uppercase; margin:0; }
+.video-gate-copy { color:#b9c9d8; font-size:15px; text-align:center; max-width:520px; }
+.video-gate-player { width:min(920px,90%); max-height:56vh; border-radius:12px; border:1px solid var(--border); background:#000; margin-top:10px; }
+.video-gate-skip { margin-top:6px; }
+.video-gate-error { position:relative; top:0; transform:none; flex-direction:column; align-items:flex-start; width:min(600px,90%); }
+.video-gate-error-actions { display:flex; gap:10px; margin-top:8px; }
+.video-gate-ready { display:flex; flex-direction:column; align-items:center; gap:14px; }
+.video-gate-ready h1 { font-size:36px; letter-spacing:-1px; margin:6px 0 0; }
 .call-controls { border-top:1px solid var(--border-soft); display:grid; grid-template-columns:220px minmax(240px,1fr) minmax(240px,1fr) minmax(180px,.8fr) 210px; align-items:center; gap:14px; padding:22px 48px; background:rgba(4,16,28,.9); }
 .call-controls.functional-controls { grid-template-columns:220px minmax(260px,1fr) minmax(210px,.7fr) 210px; }
 .record-button { min-height:58px; border-radius:10px; border:1px solid #4597ff; background:linear-gradient(180deg,#2f8dff,#126fea); color:white; font-weight:600; display:flex; align-items:center; justify-content:center; gap:10px; cursor:pointer; }
@@ -254,6 +267,11 @@ button:disabled { opacity:.45; cursor:not-allowed; transform:none!important; }
 .placeholder h1 { color:var(--text); font-size:36px; }
 
 .content-page { min-width:900px; }
+/* Escenarios de video — /goal: dos opciones explícitas, texto vs. video, no una lista mezclada. */
+.scenario-mode-toggle { display:inline-flex; gap:4px; padding:4px; background:#071829; border:1px solid var(--border); border-radius:10px; margin-bottom:18px; }
+.scenario-mode-toggle button { display:inline-flex; align-items:center; gap:8px; padding:9px 16px; border-radius:8px; border:0; background:transparent; color:var(--muted); font-size:13px; font-weight:600; cursor:pointer; }
+.scenario-mode-toggle button.active { background:linear-gradient(180deg,#2f8dff,#116ce8); color:white; }
+
 .scenario-grid,.resource-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
 .scenario-card,.resource-card { position:relative; padding:24px; display:flex; flex-direction:column; gap:18px; min-height:290px; }
 .scenario-card.selected { border-color:rgba(45,134,255,.75); box-shadow:0 0 25px rgba(45,134,255,.08); }
@@ -284,10 +302,24 @@ button:disabled { opacity:.45; cursor:not-allowed; transform:none!important; }
 .scenario-editor-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
 .scenario-points-header { display:flex; align-items:center; justify-content:space-between; color:#b9c8d7; font-size:12px; }
 .scenario-points-list { display:flex; flex-direction:column; gap:10px; }
-.scenario-point-row { display:grid; grid-template-columns:1fr 1.6fr auto auto; gap:10px; align-items:center; }
+.scenario-point-row { display:grid; grid-template-columns:1fr 1.3fr 1.3fr auto auto; gap:10px; align-items:center; }
 .scenario-point-row input { height:44px; padding:0 12px; color:var(--text); background:#071829; border:1px solid var(--border); border-radius:8px; outline:0; }
 .scenario-point-required { flex-direction:row!important; align-items:center; gap:6px!important; white-space:nowrap; }
 .scenario-point-required input { height:auto; width:auto; }
+.scenario-point-hints { font-size:13px; }
+.scenario-editor-hint { color:var(--muted); font-size:12px; line-height:1.5; margin:-4px 0 4px; }
+
+/* Escenarios de video — docs/designs/escenarios-de-video.md */
+.scenario-video-form { margin-top:22px; }
+.promote-video-form { margin:8px 0 14px; padding:16px; }
+.video-upload-row { display:flex; align-items:center; gap:12px; margin-bottom:4px; }
+.video-upload-input { position:absolute; width:1px; height:1px; opacity:0; overflow:hidden; }
+.video-upload-label { cursor:pointer; }
+.video-upload-filename { color:var(--success); font-size:12px; }
+.scenario-video-heading { display:flex; align-items:center; gap:8px; color:#b9c8d7; font-size:12px; }
+.video-ground-truth-row { grid-template-columns:1fr 1.2fr 1.2fr auto auto auto; }
+.scenario-point-visible-at { flex-direction:row!important; align-items:center; gap:6px!important; white-space:nowrap; font-size:11px; color:var(--muted); }
+.scenario-point-visible-at input { height:44px; width:64px; padding:0 8px; color:var(--text); background:#071829; border:1px solid var(--border); border-radius:8px; }
 .form-help { color:var(--muted); font-size:11px; }
 .saved-label { display:flex; align-items:center; gap:6px; color:var(--success); font-size:12px; }
 .empty-state { min-height:420px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--muted); }

@@ -1,14 +1,21 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { DEFAULT_BACKEND_WS_URL } from '../config'
-import { buildWsUrl, httpBaseFrom, login as apiLogin } from '../lib/api'
+import { buildWsUrl, getScenarioVideoAccess, httpBaseFrom, login as apiLogin } from '../lib/api'
 import { voiceBridge, type ConnectionStatus } from '../lib/voiceBridge'
-import type { CallStatus, EngineEvent, ScenarioSummary, TrainingSession, TranscriptEntry } from '../types'
+import type {
+  CallStatus,
+  EngineEvent,
+  ScenarioSummary,
+  ScenarioVideoAccess,
+  TrainingSession,
+  TranscriptEntry,
+} from '../types'
 
 const fallbackScenarios: ScenarioSummary[] = [
-  { id: 'vehicle_theft', title: 'Vehicle Theft', category: 'Police', description: 'Report a recently stolen vehicle.', difficulty: 'Medium' },
-  { id: 'domestic_dispute', title: 'Domestic Dispute', category: 'Police', description: 'Handle an active domestic disturbance.', difficulty: 'Hard' },
-  { id: 'traffic_accident', title: 'Traffic Accident', category: 'Police / EMS', description: 'Report a collision with a possible injury.', difficulty: 'Medium' },
+  { id: 'vehicle_theft', title: 'Vehicle Theft', category: 'Police', description: 'Report a recently stolen vehicle.', difficulty: 'Medium', has_video: false },
+  { id: 'domestic_dispute', title: 'Domestic Dispute', category: 'Police', description: 'Handle an active domestic disturbance.', difficulty: 'Hard', has_video: false },
+  { id: 'traffic_accident', title: 'Traffic Accident', category: 'Police / EMS', description: 'Report a collision with a possible injury.', difficulty: 'Medium', has_video: false },
 ]
 
 type PersistedConfig = 'selectedScenarioId' | 'difficulty' | 'language' | 'trainingType'
@@ -23,6 +30,9 @@ type EngineState = {
   // localStorage (el token vive 8h, NFR-04, y no debe sobrevivir a un cierre de la app).
   sessionId?: string
   authToken?: string
+  // ADR-0011 — pista de UI únicamente (ver lib/api.ts::login); nunca persistido (mismo motivo
+  // que authToken no se persiste: no debe sobrevivir a un cierre de la app).
+  role?: string
   authError?: string
   authenticating: boolean
   scenarios: ScenarioSummary[]
@@ -42,11 +52,19 @@ type EngineState = {
   lastSession?: TrainingSession
   error?: string
   warning?: string
+  // Escenarios de video (docs/designs/escenarios-de-video.md) — `undefined` = todavía sin
+  // chequear para el escenario seleccionado actual, `null` = chequeado, sin video (camino de
+  // texto de siempre), objeto = sí hay video que mostrar antes de la llamada.
+  videoAccess?: ScenarioVideoAccess | null
+  videoAccessLoading: boolean
   initialize: () => void
   login: (supervisorId: string, passphrase: string) => Promise<void>
   logout: () => void
   setConfig: (patch: Partial<Pick<EngineState, PersistedConfig>>) => void
   updateSettings: (bridgeUrl: string, userName: string) => void
+  loadVideoAccess: (scenarioId: string) => Promise<ScenarioVideoAccess | null>
+  notifyVideoEnded: (scenarioId: string) => void
+  clearVideoAccess: () => void
   startCall: () => void
   toggleRecording: () => void
   pause: () => void
@@ -76,6 +94,8 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
   dispatcherSpeaking: false,
   engineActivity: undefined,
   recording: false,
+  videoAccess: undefined,
+  videoAccessLoading: false,
 
   initialize: () => {
     // Solo cablea los listeners del bridge — ya no conecta acá. La conexión real requiere un
@@ -115,8 +135,8 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
   login: async (supervisorId, passphrase) => {
     set({ authenticating: true, authError: undefined })
     try {
-      const { sessionId, token } = await apiLogin(httpBaseFrom(get().bridgeUrl), supervisorId, passphrase)
-      set({ sessionId, authToken: token, userName: supervisorId, authenticating: false })
+      const { sessionId, token, role } = await apiLogin(httpBaseFrom(get().bridgeUrl), supervisorId, passphrase)
+      set({ sessionId, authToken: token, role, userName: supervisorId, authenticating: false })
       voiceBridge.connect(buildWsUrl(get().bridgeUrl, sessionId, token))
     } catch (error) {
       set({ authenticating: false, authError: error instanceof Error ? error.message : 'Login failed.' })
@@ -125,7 +145,7 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
 
   logout: () => {
     voiceBridge.disconnect()
-    set({ sessionId: undefined, authToken: undefined, connection: 'disconnected', callStatus: 'idle' })
+    set({ sessionId: undefined, authToken: undefined, role: undefined, connection: 'disconnected', callStatus: 'idle' })
   },
 
   setConfig: (patch) => set(patch),
@@ -136,6 +156,19 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
     // entre hosts) — forzamos un login nuevo en vez de reusar un token que ya no aplica.
     if (changedBackend) get().logout()
   },
+  loadVideoAccess: async (scenarioId) => {
+    const state = get()
+    if (!state.authToken) return null
+    set({ videoAccessLoading: true, videoAccess: undefined })
+    const access = await getScenarioVideoAccess(httpBaseFrom(state.bridgeUrl), state.authToken, scenarioId)
+    set({ videoAccess: access, videoAccessLoading: false })
+    return access
+  },
+  notifyVideoEnded: (scenarioId) => voiceBridge.send({ command: 'video.ended', scenarioId }),
+  // Se llama al efectivamente arrancar la llamada (ver CallPage.tsx) — sin esto, `videoAccess`
+  // seguiría "verdadero" para siempre y CallPage renderizaría el gate de video otra vez encima
+  // de una llamada ya en curso.
+  clearVideoAccess: () => set({ videoAccess: undefined }),
   startCall: () => {
     const state = get()
     set({ transcript: [], lastSession: undefined, error: undefined, warning: undefined, callStatus: 'connecting' })

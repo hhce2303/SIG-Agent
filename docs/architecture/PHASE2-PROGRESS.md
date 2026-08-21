@@ -121,7 +121,11 @@ certificado autofirmado en Electron (`electron/main.cjs`).
   `SpeechToTextPort`/`TextToSpeechPort`/`MicrophonePort` — no se corrió contra Whisper/Kokoro/
   Claude/sounddevice reales en esta sesión).
 - `frontend`: `tsc --noEmit` y `npm run build` en verde.
-- **Pendiente de correr en esta sesión** (requiere hardware/credenciales reales, no disponibles
-  en este entorno): una llamada real de punta a punta con `server_main.py` + `npm run dev`,
-  incluyendo el caso de matar el servidor a mitad de llamada para confirmar el flujo
-  `network_drop` contra la UI real, no solo contra el test de integración con stubs.
+- **Corrido en sesión 6 (2026-08-20):** primera llamada real de punta a punta con
+  `server_main.py` real (Whisper+Claude+Kokoro+mic reales) + frontend real — ver
+  [PHASE1-PROGRESS.md](./PHASE1-PROGRESS.md#sesión-6-2026-08-20--gate-0--primera-corrida-de-punta-a-punta-real).
+  Encontró y corrigió 3 crashes reales de encoding en Windows, y descubrió un hallazgo real de
+  precisión de scoring ([TODO-17](./TODOS.md#todo-17)). **Sigue sin probarse deliberadamente**
+  el caso de matar el servidor a mitad de llamada contra la UI real (sí está cubierto por
+  `test_server_app.py` con stubs) — no se repitió esa prueba puntual contra hardware real en
+  esta sesión.

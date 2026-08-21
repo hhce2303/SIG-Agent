@@ -55,6 +55,39 @@ def test_create_get_update_delete_round_trip(tmp_path):
     assert store.get(scenario.id) is None
 
 
+def test_match_hints_round_trip_through_the_json_column(tmp_path):
+    # TODO-17: match_hints se agregó a CriticalDataPoint después de que la tabla ya existía en
+    # producción (Gate 0) — confirma que el round-trip funciona sin ALTER TABLE (ver TODO-20) y
+    # que una fila vieja sin la clave `match_hints` en su JSON sigue cargando con el default.
+    store = SQLiteScenarioStore(str(tmp_path / "scenarios.db"))
+    scenario = Scenario(
+        id="",
+        title="Robbery",
+        category="Police",
+        difficulty="Hard",
+        language="English",
+        description="An armed robbery.",
+        briefing="A caller reports an armed robbery in progress.",
+        critical_data_points=[
+            CriticalDataPoint(
+                key="vehicle", label="Vehicle description", match_hints=["camry", "sedan"]
+            ),
+        ],
+    )
+
+    store.create(scenario)
+    fetched = store.get(scenario.id)
+
+    assert fetched.critical_data_points[0].match_hints == ["camry", "sedan"]
+
+    # Fila "vieja" simulada: el seed original (creado antes de este cambio, ver
+    # `_seed_scenarios`) ya no tiene match_hints vacío por default en este repo, pero el
+    # contrato retrocompatible sí importa para cualquier fila real que exista hoy en
+    # producción sin esa clave — probarlo directo contra el JSON, no contra el seed actual.
+    vehicle_theft = store.get("vehicle_theft")
+    assert isinstance(vehicle_theft.critical_data_points[0].match_hints, list)
+
+
 def test_get_returns_none_for_an_unknown_id(tmp_path):
     store = SQLiteScenarioStore(str(tmp_path / "scenarios.db"))
 

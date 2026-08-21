@@ -15,11 +15,15 @@ la regla "ADR-first" de CONTRIBUTING.md.
 """
 
 import asyncio
+import hashlib
 import logging
+import os
 import time
 import uuid
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, WebSocketException
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, WebSocketException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette import status
 
@@ -33,24 +37,37 @@ from core.ports import (
     IncidentOutcome,
     IncidentOutcomePort,
     InvalidSessionTokenError,
+    InvalidVideoTokenError,
     MicrophonePort,
     PersistencePort,
     Scenario,
     ScenarioPort,
+    ScenarioVideo,
+    ScenarioVideoPort,
     SessionRecord,
     SessionTokenClaims,
     SessionTokenPort,
     SettingsPort,
     SpeechToTextPort,
     TextToSpeechPort,
+    VideoGroundTruthPoint,
+    VideoTokenPort,
 )
 from core.scoring import score_session
 from core.turn_state import InvalidTurnTransitionError, TurnStateMachine
+from server.video_probe import probe_mp4_duration_seconds
+from server.video_streaming import iter_file_range, parse_range_header
 
 logger = logging.getLogger("voice_agent.server")
 
 PROTOCOL_VERSION = "0.3.0"  # Fase 2: protocolo completo de comandos/eventos, no solo turn-state
 CLAUDE_TIMEOUT_SECONDS = 8.0
+VIDEO_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB — ver server/video_streaming.py
+VIDEO_UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB — ver ADR-0012
+DEFAULT_VIDEO_MAX_UPLOAD_BYTES = 2 * 1024**3  # 2 GiB
+# ADR-0012 — allowlist explícito de contenedor: rechazar con 4xx en vez de "aceptar y fallar
+# después" (Eng, requisito del plan de tests). `server/video_probe.py` solo entiende MP4/MOV.
+ALLOWED_VIDEO_EXTENSIONS = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v"}
 
 
 class LoginRequest(BaseModel):
@@ -61,12 +78,18 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     session_id: str
     token: str
+    # ADR-0011 — puramente informativo para que el frontend sepa qué UI mostrar (ej. "adjuntar
+    # video al promover un incidente"); la aplicación real del rol vive en el servidor
+    # (`_require_manager`, re-deriva el rol del token verificado, nunca confía en lo que un
+    # cliente mande de vuelta), así que exponerlo acá no debilita nada.
+    role: str
 
 
 class CriticalDataPointModel(BaseModel):
     key: str
     label: str
     required: bool = True
+    match_hints: list[str] = Field(default_factory=list)  # TODO-17 — ver core/scoring.py
 
 
 class ScenarioIn(BaseModel):
@@ -83,6 +106,79 @@ class ScenarioOut(ScenarioIn):
     id: str
     created_at: float
     updated_at: float
+    has_video: bool = False  # docs/designs/escenarios-de-video.md — sin cambiar Scenario en sí
+
+
+class VideoGroundTruthPointModel(BaseModel):
+    key: str
+    label: str
+    match_hints: list[str] = Field(default_factory=list)
+    visible_from_seconds: float = 0.0
+    visible_to_seconds: float = 0.0
+    required: bool = True
+
+
+class ScenarioVideoIn(BaseModel):
+    """Cuerpo de `PUT /scenarios/{id}/video` — `video_path` puede venir de `POST /videos/upload`
+    (ADR-0012, el camino normal) o seguir siendo una ruta ya colocada a mano en el servidor (v1,
+    todavía soportado, ver "Scope Decision" del plan original)."""
+
+    video_path: str
+    duration_seconds: float = Field(gt=0)
+    content_type: str = "video/mp4"
+    ground_truth_points: list[VideoGroundTruthPointModel] = Field(default_factory=list)
+
+
+class ScenarioVideoOut(BaseModel):
+    """Vista de autoría (editor) — SÍ incluye `match_hints` porque quien la lee ya es quien
+    autora el escenario. Nunca se manda esta forma al camino de acceso del entrenando antes/
+    durante la llamada (`GET /scenarios/{id}/video`), que se queda con `ScenarioVideoAccessOut`.
+    """
+
+    scenario_id: str
+    video_path: str
+    video_checksum: str
+    duration_seconds: float
+    content_type: str
+    ground_truth_points: list[VideoGroundTruthPointModel]
+    created_at: float
+    updated_at: float
+
+
+class ScenarioVideoUploadOut(BaseModel):
+    """Respuesta de `POST /videos/upload` (ADR-0012) — el frontend usa esto para completar el
+    formulario de `PUT /scenarios/{id}/video` o de `promote-to-scenario` con `video` (que siguen
+    siendo la única forma de fijar el ground truth), no para adjuntar el video directamente en
+    un solo paso.
+    """
+
+    video_path: str
+    video_checksum: str
+    duration_seconds: float | None  # `None` = no se pudo detectar automáticamente, pedir a mano
+    content_type: str
+
+
+class ScenarioVideoAccessOut(BaseModel):
+    """Lo mínimo que necesita el entrenando para reproducir el video antes de la llamada — sin
+    `ground_truth_points` (sería filtrar la respuesta correcta antes de que hable, ver ADR-0010).
+    """
+
+    content_type: str
+    duration_seconds: float
+    stream_url: str
+
+
+class PromoteVideoIn(BaseModel):
+    video_path: str
+    duration_seconds: float = Field(gt=0)
+    content_type: str = "video/mp4"
+    ground_truth_points: list[VideoGroundTruthPointModel] = Field(default_factory=list)
+
+
+class PromoteIn(BaseModel):
+    # ADR-0011: adjuntar video real de un incidente exige role=="manager" — promover sin video
+    # (`video=None`, el body entero es opcional) sigue igual que antes de este ADR.
+    video: PromoteVideoIn | None = None
 
 
 class SettingsModel(BaseModel):
@@ -133,13 +229,40 @@ def create_app(
     tts: TextToSpeechPort,
     microphone: MicrophonePort,
     clock=time.time,
+    scenario_video_store: ScenarioVideoPort | None = None,
+    video_token_issuer: VideoTokenPort | None = None,
+    manager_passphrase: str = "",
+    video_storage_dir: str | None = None,
+    video_max_upload_bytes: int = DEFAULT_VIDEO_MAX_UPLOAD_BYTES,
 ) -> FastAPI:
     """Factory (no una `app` global a nivel de módulo) para que los tests puedan inyectar
     dobles de prueba de cada puerto sin compartir estado entre tests ni depender de
     Whisper/Kokoro/Claude/sounddevice reales.
+
+    `scenario_video_store`/`video_token_issuer` son `None` por default para no romper cualquier
+    caller existente (tests, `server_main.py` antes de que se configuren) — las rutas de video
+    responden 503 "video feature not configured" en vez de un `AttributeError` sobre `None`.
+    `manager_passphrase` vacío (default) es "no hay login de manager posible" — ADR-0011 exige
+    fallar cerrado, no abierto. `video_storage_dir=None` deshabilita específicamente el upload
+    (`/videos/upload` responde 503) sin afectar `PUT /scenarios/{id}/video` (referencia manual de
+    path, sigue funcionando igual — ver ADR-0012, el upload complementa esa v1, no la reemplaza).
     """
 
     app = FastAPI(title="voice-agent server")
+
+    # El frontend siempre llama por REST desde un origen distinto al del backend (Vite en
+    # `npm run dev`, o el cliente Electron empaquetado sirviendo la UI desde `file://`) — sin
+    # esto, el navegador bloquea el `fetch` entero con un error de CORS antes de que la request
+    # llegue acá (no es un 401/403, ni siquiera hay respuesta que loguear). Wildcard es seguro
+    # en este caso porque la auth real (ADR-0008) viaja en el header `Authorization: Bearer`,
+    # nunca en una cookie (`allow_credentials` queda False) — no hay sesión de navegador que un
+    # origen ajeno pueda montar, solo un origen que ya tiene el token puede leer la respuesta.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     def _bearer_claims(authorization: str | None = Header(default=None)) -> SessionTokenClaims:
         if not authorization or not authorization.lower().startswith("bearer "):
@@ -149,6 +272,15 @@ def create_app(
             return token_issuer.verify(authorization.split(" ", 1)[1])
         except InvalidSessionTokenError as error:
             raise HTTPException(status_code=401, detail=str(error)) from error
+
+    def _require_manager(claims: SessionTokenClaims = Depends(_bearer_claims)) -> SessionTokenClaims:
+        """ADR-0011 — gate de rol mínimo antes de exponer/adjuntar video de un incidente real.
+        No reemplaza `_bearer_claims` (ya corrió), solo agrega el chequeo de rol encima.
+        """
+
+        if claims.role != "manager":
+            raise HTTPException(status_code=403, detail="requires the manager role")
+        return claims
 
     # -----------------------------------------------------------------
     # REST — salud, auth (sin cambios de Fase 1), escenarios y ajustes (nuevo, Fase 2).
@@ -160,36 +292,46 @@ def create_app(
 
     @app.post("/auth/login", response_model=LoginResponse)
     def login(body: LoginRequest):
-        if body.passphrase != supervisor_passphrase:
+        # ADR-0011: `manager_passphrase` vacío (default) hace que esta rama sea inalcanzable —
+        # sin esa env var configurada, nadie puede autenticarse como manager (falla cerrado).
+        if manager_passphrase and body.passphrase == manager_passphrase:
+            role = "manager"
+        elif body.passphrase == supervisor_passphrase:
+            role = "supervisor"
+        else:
             log_event(logger, "login_failed", supervisor_id=body.supervisor_id)
             raise HTTPException(status_code=401, detail="invalid credentials")
 
         session_id = str(uuid.uuid4())
-        token = token_issuer.issue(supervisor_id=body.supervisor_id, session_id=session_id)
+        token = token_issuer.issue(supervisor_id=body.supervisor_id, session_id=session_id, role=role)
 
         log_event(
-            logger, "login_succeeded", correlation_id=session_id, supervisor_id=body.supervisor_id
+            logger,
+            "login_succeeded",
+            correlation_id=session_id,
+            supervisor_id=body.supervisor_id,
+            role=role,
         )
 
-        return LoginResponse(session_id=session_id, token=token)
+        return LoginResponse(session_id=session_id, token=token, role=role)
 
     @app.get("/scenarios", response_model=list[ScenarioOut])
     def list_scenarios(claims: SessionTokenClaims = Depends(_bearer_claims)):
-        return [_scenario_out(scenario) for scenario in scenario_store.list()]
+        return [_scenario_out(scenario, scenario_video_store) for scenario in scenario_store.list()]
 
     @app.get("/scenarios/{scenario_id}", response_model=ScenarioOut)
     def get_scenario(scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
         scenario = scenario_store.get(scenario_id)
         if scenario is None:
             raise HTTPException(status_code=404, detail="scenario not found")
-        return _scenario_out(scenario)
+        return _scenario_out(scenario, scenario_video_store)
 
     @app.post("/scenarios", response_model=ScenarioOut, status_code=201)
     def create_scenario(body: ScenarioIn, claims: SessionTokenClaims = Depends(_bearer_claims)):
         scenario = Scenario(id="", **_scenario_fields(body))
         scenario_store.create(scenario)
         log_event(logger, "scenario_created", supervisor_id=claims.supervisor_id, scenario_id=scenario.id)
-        return _scenario_out(scenario)
+        return _scenario_out(scenario, scenario_video_store)
 
     @app.put("/scenarios/{scenario_id}", response_model=ScenarioOut)
     def update_scenario(
@@ -204,12 +346,254 @@ def create_app(
 
         scenario_store.update(existing)
         log_event(logger, "scenario_updated", supervisor_id=claims.supervisor_id, scenario_id=scenario_id)
-        return _scenario_out(existing)
+        return _scenario_out(existing, scenario_video_store)
 
     @app.delete("/scenarios/{scenario_id}", status_code=204)
     def delete_scenario(scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
         scenario_store.delete(scenario_id)
+        if scenario_video_store is not None:
+            # Eng finding 2.3: no dejar la referencia de video colgando de un escenario borrado.
+            # El archivo en disco solo se borra si lo subimos nosotros (ADR-0012,
+            # `_delete_owned_video_file`) — una referencia manual de v1 (fuera de
+            # `video_storage_dir`) nunca se toca, no es nuestra para borrar.
+            _delete_owned_video_file(scenario_video_store.get(scenario_id))
+            scenario_video_store.delete(scenario_id)
         log_event(logger, "scenario_deleted", supervisor_id=claims.supervisor_id, scenario_id=scenario_id)
+
+    # -----------------------------------------------------------------
+    # Video de escenarios — docs/designs/escenarios-de-video.md, ADR-0009/ADR-0010.
+    # -----------------------------------------------------------------
+
+    def _require_video_feature() -> None:
+        if scenario_video_store is None or video_token_issuer is None:
+            raise HTTPException(status_code=503, detail="video scenarios are not configured on this server")
+
+    @app.get("/scenarios/{scenario_id}/video", response_model=ScenarioVideoAccessOut)
+    def get_scenario_video_access(
+        scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        """Lo que necesita el entrenando para reproducir el video antes de la llamada — emite
+        un token de streaming de vida corta (ADR-0009), nunca el ground truth (ADR-0010)."""
+
+        _require_video_feature()
+        video = scenario_video_store.get(scenario_id)
+        if video is None:
+            raise HTTPException(status_code=404, detail="scenario has no video")
+
+        stream_token = video_token_issuer.issue(scenario_id=scenario_id, supervisor_id=claims.supervisor_id)
+        return ScenarioVideoAccessOut(
+            content_type=video.content_type,
+            duration_seconds=video.duration_seconds,
+            stream_url=f"/scenarios/{scenario_id}/video/stream?token={stream_token}",
+        )
+
+    @app.get("/scenarios/{scenario_id}/video/ground-truth", response_model=ScenarioVideoOut)
+    def get_scenario_video_ground_truth(
+        scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        """Vista de autoría (editor) — SÍ incluye `match_hints`/timestamps. Ruta separada a
+        propósito de `get_scenario_video_access` para que la respuesta correcta nunca viaje por
+        el camino que también usa el entrenando antes de la llamada."""
+
+        _require_video_feature()
+        video = scenario_video_store.get(scenario_id)
+        if video is None:
+            raise HTTPException(status_code=404, detail="scenario has no video")
+        return _scenario_video_out(video)
+
+    @app.put("/scenarios/{scenario_id}/video", response_model=ScenarioVideoOut)
+    def put_scenario_video(
+        scenario_id: str, body: ScenarioVideoIn, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        _require_video_feature()
+        if scenario_store.get(scenario_id) is None:
+            raise HTTPException(status_code=404, detail="scenario not found")
+
+        for point in body.ground_truth_points:
+            if not (0 <= point.visible_from_seconds <= point.visible_to_seconds <= body.duration_seconds):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"ground truth point {point.key!r} has a visibility range outside "
+                        f"[0, {body.duration_seconds}]"
+                    ),
+                )
+
+        try:
+            checksum = _sha256_of_file(body.video_path)
+        except OSError as error:
+            # No es un path controlado por el cliente en el sentido de traversal (ver ADR-0009 —
+            # es una referencia manual de admin, no una request de un entrenando), pero sí debe
+            # dar un error claro si el archivo no existe, no un 500 crudo.
+            raise HTTPException(status_code=400, detail=f"video_path is not readable: {error}") from error
+
+        video = ScenarioVideo(
+            scenario_id=scenario_id,
+            video_path=body.video_path,
+            video_checksum=checksum,
+            duration_seconds=body.duration_seconds,
+            content_type=body.content_type,
+            ground_truth_points=[
+                VideoGroundTruthPoint(
+                    key=p.key,
+                    label=p.label,
+                    match_hints=p.match_hints,
+                    visible_from_seconds=p.visible_from_seconds,
+                    visible_to_seconds=p.visible_to_seconds,
+                    required=p.required,
+                )
+                for p in body.ground_truth_points
+            ],
+        )
+        scenario_video_store.upsert(video)
+        log_event(
+            logger, "scenario_video_attached", supervisor_id=claims.supervisor_id, scenario_id=scenario_id
+        )
+        return _scenario_video_out(scenario_video_store.get(scenario_id))
+
+    @app.post("/videos/upload", response_model=ScenarioVideoUploadOut)
+    async def upload_video(
+        file: UploadFile = File(...),
+        claims: SessionTokenClaims = Depends(_bearer_claims),
+    ):
+        """ADR-0012 — reemplaza tener que colocar el archivo a mano en el disco del servidor
+        (v1, `PUT`/`promote-to-scenario` seguían pidiendo un `video_path` ya existente). El
+        nombre en disco es siempre generado por el servidor (UUID), nunca el nombre que mandó el
+        cliente (Eng 4.3, path traversal).
+
+        Deliberadamente NO scopeado a un `scenario_id`: el archivo no pertenece a ningún
+        escenario todavía en el momento de subirlo — dos callers distintos lo usan antes de que
+        exista una relación (`PUT /scenarios/{id}/video` para un escenario ya creado, y
+        `POST /incidents/{id}/promote-to-scenario` con `video`, donde el escenario recién se
+        crea en esa misma llamada). Ambos completan el mismo `video_path`/`duration_seconds` que
+        esto devuelve en su propio formulario — este endpoint solo resuelve "¿cómo llega el
+        archivo al servidor?", nunca decide a qué se adjunta.
+        """
+
+        if video_storage_dir is None:
+            raise HTTPException(status_code=503, detail="video upload is not configured on this server")
+        _require_video_feature()
+
+        extension = os.path.splitext(file.filename or "")[1].lower()
+        content_type = ALLOWED_VIDEO_EXTENSIONS.get(extension)
+        if content_type is None:
+            raise HTTPException(
+                status_code=415,
+                detail=f"unsupported video file type {extension!r} — allowed: {sorted(ALLOWED_VIDEO_EXTENSIONS)}",
+            )
+
+        os.makedirs(video_storage_dir, exist_ok=True)
+        final_path = os.path.join(video_storage_dir, f"{uuid.uuid4()}{extension}")
+        temp_path = f"{final_path}.part"
+
+        total_bytes = 0
+        try:
+            with open(temp_path, "wb") as out:
+                while True:
+                    chunk = await file.read(VIDEO_UPLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > video_max_upload_bytes:
+                        raise HTTPException(status_code=413, detail="video file exceeds the upload size limit")
+                    out.write(chunk)
+            # Eng 2.2: write-temp -> rename atómico — nunca deja un archivo a medio escribir con
+            # el nombre final que otro request podría leer mientras se sube.
+            os.replace(temp_path, final_path)
+        except HTTPException:
+            _remove_if_exists(temp_path)
+            raise
+        finally:
+            await file.close()
+
+        checksum = _sha256_of_file(final_path)
+        duration = probe_mp4_duration_seconds(final_path)
+
+        log_event(
+            logger,
+            "video_uploaded",
+            supervisor_id=claims.supervisor_id,
+            bytes=total_bytes,
+            duration_detected=duration is not None,
+        )
+
+        return ScenarioVideoUploadOut(
+            video_path=final_path,
+            video_checksum=checksum,
+            duration_seconds=duration,
+            content_type=content_type,
+        )
+
+    def _delete_owned_video_file(video: ScenarioVideo | None) -> None:
+        """Eng 2.3 (huérfanos en disco): solo borra el archivo si vive DENTRO de
+        `video_storage_dir` — es decir, si lo subimos nosotros vía `/videos/upload` (ADR-0012).
+        Un `video_path` de la v1 manual (colocado por un admin fuera de ese directorio) nunca se
+        borra automáticamente — no es nuestro para borrar."""
+
+        if video is None or video_storage_dir is None:
+            return
+        try:
+            video_dir_real = os.path.realpath(video_storage_dir)
+            video_path_real = os.path.realpath(video.video_path)
+            same_tree = os.path.commonpath([video_dir_real, video_path_real]) == video_dir_real
+        except (OSError, ValueError):
+            # ValueError: paths en distinta unidad de Windows — no puede ser el mismo árbol.
+            return
+        if same_tree:
+            _remove_if_exists(video.video_path)
+
+    @app.delete("/scenarios/{scenario_id}/video", status_code=204)
+    def delete_scenario_video(scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
+        _require_video_feature()
+        _delete_owned_video_file(scenario_video_store.get(scenario_id))
+        scenario_video_store.delete(scenario_id)
+        log_event(
+            logger, "scenario_video_detached", supervisor_id=claims.supervisor_id, scenario_id=scenario_id
+        )
+
+    @app.get("/scenarios/{scenario_id}/video/stream")
+    def stream_scenario_video(scenario_id: str, token: str, request: Request):
+        """Sin `_bearer_claims` a propósito — un `<video src>` HTML no puede mandar el header
+        `Authorization` (ver ADR-0009). Se autentica con el token de vida corta que emite
+        `get_scenario_video_access` en su lugar."""
+
+        _require_video_feature()
+        try:
+            video_token_issuer.verify(token, scenario_id)
+        except InvalidVideoTokenError as error:
+            raise HTTPException(status_code=401, detail=str(error)) from error
+
+        video = scenario_video_store.get(scenario_id)
+        if video is None:
+            raise HTTPException(status_code=404, detail="scenario has no video")
+
+        try:
+            file_size = os.path.getsize(video.video_path)
+        except OSError as error:
+            # Eng finding 2.5: archivo referenciado pero ausente en disco — estado explícito.
+            log_event(
+                logger, "scenario_video_missing_on_disk", correlation_id=scenario_id, error=str(error)
+            )
+            raise HTTPException(status_code=404, detail="video file is missing on disk") from error
+
+        range_bounds = parse_range_header(request.headers.get("range"), file_size)
+
+        if range_bounds is None and request.headers.get("range") is not None:
+            # Había un header Range, pero no es satisfacible (ej. start >= file_size).
+            raise HTTPException(status_code=416, detail="invalid range")
+
+        start, end = range_bounds if range_bounds is not None else (0, file_size - 1)
+        headers = {"Accept-Ranges": "bytes", "Content-Length": str(end - start + 1)}
+
+        if range_bounds is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+        return StreamingResponse(
+            iter_file_range(video.video_path, start, end, chunk_size=VIDEO_STREAM_CHUNK_SIZE),
+            status_code=206 if range_bounds is not None else 200,
+            media_type=video.content_type,
+            headers=headers,
+        )
 
     @app.get("/settings", response_model=SettingsModel)
     def get_settings(claims: SessionTokenClaims = Depends(_bearer_claims)):
@@ -246,13 +630,22 @@ def create_app(
 
     @app.post("/incidents/{incident_id}/promote-to-scenario", response_model=ScenarioOut, status_code=201)
     def promote_incident_to_scenario(
-        incident_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)
+        incident_id: str,
+        body: PromoteIn = PromoteIn(),
+        claims: SessionTokenClaims = Depends(_bearer_claims),
     ):
         """Lazo de retroalimentación (roadmap Fase 3): convierte el post-mortem de un incidente
         real (`notes`) en un borrador de `Scenario` — se crea vacío de `critical_data_points` a
         propósito, el editor CRUD ya existente (Fase 2) es donde se termina de completar, no se
         inventa un segundo formulario para lo mismo.
+
+        Escenarios de video (docs/designs/escenarios-de-video.md): `body.video`, si viene, adjunta
+        el video real del incidente al escenario nuevo — exige `role == "manager"` (ADR-0011),
+        promover sin `video` sigue exactamente igual que antes de ese ADR, sin chequeo de rol.
         """
+
+        if body.video is not None and claims.role != "manager":
+            raise HTTPException(status_code=403, detail="attaching incident video requires the manager role")
 
         incident = incident_store.get(incident_id)
         if incident is None:
@@ -272,14 +665,42 @@ def create_app(
         )
         scenario_store.create(scenario)
         incident_store.mark_promoted(incident_id, scenario.id)
+
+        if body.video is not None:
+            _require_video_feature()
+            try:
+                checksum = _sha256_of_file(body.video.video_path)
+            except OSError as error:
+                raise HTTPException(status_code=400, detail=f"video_path is not readable: {error}") from error
+
+            scenario_video_store.upsert(ScenarioVideo(
+                scenario_id=scenario.id,
+                video_path=body.video.video_path,
+                video_checksum=checksum,
+                duration_seconds=body.video.duration_seconds,
+                content_type=body.video.content_type,
+                ground_truth_points=[
+                    VideoGroundTruthPoint(
+                        key=p.key,
+                        label=p.label,
+                        match_hints=p.match_hints,
+                        visible_from_seconds=p.visible_from_seconds,
+                        visible_to_seconds=p.visible_to_seconds,
+                        required=p.required,
+                    )
+                    for p in body.video.ground_truth_points
+                ],
+            ))
+
         log_event(
             logger,
             "incident_promoted_to_scenario",
             supervisor_id=claims.supervisor_id,
             incident_id=incident_id,
             scenario_id=scenario.id,
+            with_video=body.video is not None,
         )
-        return _scenario_out(scenario)
+        return _scenario_out(scenario, scenario_video_store)
 
     @app.get("/impact-report", response_model=ImpactReportModel)
     def get_impact_report(claims: SessionTokenClaims = Depends(_bearer_claims)):
@@ -333,9 +754,17 @@ def create_app(
         conversation: list[dict[str, str]] = []
         transcript: list[dict] = []
         active_scenario: Scenario | None = None
+        active_video: ScenarioVideo | None = None
         call_config = {"difficulty": "", "language": "", "training_type": ""}
         call_ended = False  # True una vez que un `call.end` explícito ya persistió la sesión.
         call_started_once = False  # Evita persistir un registro fantasma si nunca hubo `call.start`.
+        # Eng finding 5c: el reloj de "tiempo de reacción" es cuándo terminó el video pre-llamada,
+        # NUNCA `started_at`/`call.start` — un entrenando puede ver el video, tomarse un café, y
+        # arrancar la llamada mucho después. `video_ended_scenario_id` evita el bug de staleness
+        # de usar el timestamp de un escenario de video ANTERIOR si la llamada siguiente es de un
+        # escenario distinto (con o sin video) en la misma conexión WS.
+        video_ended_at: float | None = None
+        video_ended_scenario_id: str = ""
 
         async def send(payload: dict) -> None:
             await websocket.send_json(payload)
@@ -343,7 +772,7 @@ def create_app(
         async def send_scenarios() -> None:
             await send({
                 "event": "scenarios.data",
-                "scenarios": [_scenario_summary(s) for s in scenario_store.list()],
+                "scenarios": [_scenario_summary(s, scenario_video_store) for s in scenario_store.list()],
             })
 
         async def send_history() -> None:
@@ -440,11 +869,27 @@ def create_app(
             return None
 
         async def finish_call(outcome: str) -> None:
-            nonlocal call_ended, active_scenario
+            nonlocal call_ended, active_scenario, active_video
 
             ended_at = clock()
             critical_data_points = active_scenario.critical_data_points if active_scenario else []
-            evaluation = score_session(transcript, critical_data_points, started_at, ended_at, outcome)
+            video_ground_truth = active_video.ground_truth_points if active_video else []
+            # Ver comentario en la inicialización de `video_ended_at` sobre por qué se valida
+            # contra `video_ended_scenario_id` en vez de usarse tal cual.
+            reaction_video_ended_at = (
+                video_ended_at
+                if active_scenario and video_ended_scenario_id == active_scenario.id
+                else None
+            )
+            evaluation = score_session(
+                transcript,
+                critical_data_points,
+                started_at,
+                ended_at,
+                outcome,
+                video_ground_truth=video_ground_truth,
+                video_ended_at=reaction_video_ended_at,
+            )
 
             record = SessionRecord(
                 session_id=session_id,
@@ -472,6 +917,7 @@ def create_app(
                 await send({"event": "session.completed", "session": _training_session(record)})
 
             active_scenario = None
+            active_video = None
 
         try:
             await send({"event": "system.ready", "version": PROTOCOL_VERSION})
@@ -491,6 +937,15 @@ def create_app(
                 elif command == "history.list":
                     await send_history()
 
+                elif command == "video.ended":
+                    # Ver docs/designs/escenarios-de-video.md (Design, hallazgo 2): el cliente
+                    # manda esto cuando el entrenando terminó de ver el video pre-llamada (o lo
+                    # saltó) — antes de `call.start`, nunca durante la llamada. Sin auto-avance:
+                    # esto solo registra el timestamp, el cliente decide cuándo mandar
+                    # `call.start` después (interstitial de calma, no auto-avanzante).
+                    video_ended_scenario_id = message.get("scenarioId", "")
+                    video_ended_at = clock()
+
                 elif command == "call.start":
                     scenario = scenario_store.get(message.get("scenarioId", ""))
                     if scenario is None:
@@ -498,6 +953,7 @@ def create_app(
                         continue
 
                     active_scenario = scenario
+                    active_video = scenario_video_store.get(scenario.id) if scenario_video_store else None
                     call_config = {
                         "difficulty": message.get("difficulty", ""),
                         "language": message.get("language", ""),
@@ -520,6 +976,7 @@ def create_app(
                         await send({"event": "error", "message": "No microphone was detected.", "recoverable": True})
                         await send({"event": "call.status", "status": "error"})
                         active_scenario = None
+                        active_video = None
                         continue
 
                     call_started_once = True
@@ -527,7 +984,7 @@ def create_app(
                     await send({
                         "event": "call.started",
                         "sessionId": session_id,
-                        "scenario": _scenario_summary(scenario),
+                        "scenario": _scenario_summary(scenario, scenario_video_store),
                     })
                     await send({"event": "call.status", "status": "connected"})
 
@@ -651,17 +1108,66 @@ def create_app(
     return app
 
 
-def _scenario_summary(scenario: Scenario) -> dict:
+def _remove_if_exists(path: str) -> None:
+    # Limpieza de un `.part` a medio escribir si el upload falla (tamaño excedido, etc.) — no
+    # hay nada que hacer si ya no está ahí, así que se ignora ese caso puntual.
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def _sha256_of_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+    """Checksum server-side del archivo de video (ADR-0009/ADR-0010) — nunca confía en un
+    checksum que mandara el cliente. Levanta `OSError` tal cual si el archivo no existe/no se
+    puede leer; el caller decide cómo traducir eso a una respuesta HTTP."""
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _scenario_video_out(video: ScenarioVideo) -> ScenarioVideoOut:
+    return ScenarioVideoOut(
+        scenario_id=video.scenario_id,
+        video_path=video.video_path,
+        video_checksum=video.video_checksum,
+        duration_seconds=video.duration_seconds,
+        content_type=video.content_type,
+        ground_truth_points=[
+            VideoGroundTruthPointModel(
+                key=p.key,
+                label=p.label,
+                match_hints=p.match_hints,
+                visible_from_seconds=p.visible_from_seconds,
+                visible_to_seconds=p.visible_to_seconds,
+                required=p.required,
+            )
+            for p in video.ground_truth_points
+        ],
+        created_at=video.created_at,
+        updated_at=video.updated_at,
+    )
+
+
+def _has_video(scenario_video_store: ScenarioVideoPort | None, scenario_id: str) -> bool:
+    return scenario_video_store is not None and scenario_video_store.get(scenario_id) is not None
+
+
+def _scenario_summary(scenario: Scenario, scenario_video_store: ScenarioVideoPort | None = None) -> dict:
     return {
         "id": scenario.id,
         "title": scenario.title,
         "category": scenario.category,
         "description": scenario.description,
         "difficulty": scenario.difficulty,
+        "has_video": _has_video(scenario_video_store, scenario.id),
     }
 
 
-def _scenario_out(scenario: Scenario) -> ScenarioOut:
+def _scenario_out(scenario: Scenario, scenario_video_store: ScenarioVideoPort | None = None) -> ScenarioOut:
     return ScenarioOut(
         id=scenario.id,
         title=scenario.title,
@@ -671,11 +1177,12 @@ def _scenario_out(scenario: Scenario) -> ScenarioOut:
         description=scenario.description,
         briefing=scenario.briefing,
         critical_data_points=[
-            CriticalDataPointModel(key=p.key, label=p.label, required=p.required)
+            CriticalDataPointModel(key=p.key, label=p.label, required=p.required, match_hints=p.match_hints)
             for p in scenario.critical_data_points
         ],
         created_at=scenario.created_at,
         updated_at=scenario.updated_at,
+        has_video=_has_video(scenario_video_store, scenario.id),
     )
 
 
@@ -688,7 +1195,7 @@ def _scenario_fields(body: ScenarioIn) -> dict:
         "description": body.description,
         "briefing": body.briefing,
         "critical_data_points": [
-            CriticalDataPoint(key=p.key, label=p.label, required=p.required)
+            CriticalDataPoint(key=p.key, label=p.label, required=p.required, match_hints=p.match_hints)
             for p in body.critical_data_points
         ],
     }

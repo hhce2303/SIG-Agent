@@ -11,3 +11,6 @@ apps/voice-agent/src/sessions.db
 .pytest_cache/
 __pycache__/
 *.pyc
+
+# Scripts temporales generados por dev-up.ps1 en cada corrida — no son parte del repo.
+.dev-up-tmp/

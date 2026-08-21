@@ -6,13 +6,13 @@ import { useEngineStore } from '../stores/engineStore'
 
 export default function HomePage() {
   const navigate = useNavigate()
-  const { connection, scenarios, history, selectedScenarioId, difficulty, language, trainingType, setConfig, startCall } = useEngineStore()
+  const { connection, scenarios, history, selectedScenarioId, difficulty, language, trainingType, setConfig } = useEngineStore()
   const scored = history.filter((session) => session.evaluation)
   const average = scored.length ? Math.round(scored.reduce((sum, session) => sum + (session.evaluation?.overall_score ?? 0), 0) / scored.length) : 0
-  const start = () => {
-    startCall()
-    navigate('/call')
-  }
+  // docs/designs/escenarios-de-video.md — no manda `call.start` directo: CallPage decide cuándo
+  // (de inmediato si el escenario no tiene video, o después del gate de video si sí lo tiene).
+  // Mismo motivo por el que ScenariosPage.tsx tampoco lo manda más — un solo lugar decide esto.
+  const start = () => navigate('/call')
   return (
     <AppShell active="Home">
       <section className="home-layout">
@@ -25,7 +25,16 @@ export default function HomePage() {
           <div className="hero-divider" />
           <button className="primary-cta" onClick={start}><Play fill="currentColor" size={27} />Start Training</button>
           <div className="selector-grid">
-            <Selector label="Scenario" icon={<Dice5 size={18} />} value={selectedScenarioId} onChange={(value) => setConfig({ selectedScenarioId: value })} options={scenarios.map((scenario) => [scenario.id, scenario.title])} />
+            <Selector
+              label="Scenario"
+              icon={<Dice5 size={18} />}
+              value={selectedScenarioId}
+              onChange={(value) => setConfig({ selectedScenarioId: value })}
+              // docs/designs/escenarios-de-video.md — el marcador de texto es la única forma de
+              // distinguir tipo dentro de un <option> nativo; el toggle de dos pestañas real
+              // vive en ScenariosPage.tsx, esto es solo una pista rápida acá en Home.
+              options={scenarios.map((scenario) => [scenario.id, scenario.has_video ? `🎬 ${scenario.title}` : scenario.title])}
+            />
             <Selector label="Difficulty" icon={<Activity size={18} />} value={difficulty} onChange={(value) => setConfig({ difficulty: value })} options={['Easy', 'Medium', 'Hard', 'Expert'].map((value) => [value, value])} />
             <Selector label="Language" icon={<Globe2 size={18} />} value={language} onChange={(value) => setConfig({ language: value })} options={['English', 'Spanish'].map((value) => [value, value])} />
             <Selector label="Training Type" icon={<ShieldCheck size={18} />} value={trainingType} onChange={(value) => setConfig({ trainingType: value })} options={['Police', 'Police / EMS'].map((value) => [value, value])} />

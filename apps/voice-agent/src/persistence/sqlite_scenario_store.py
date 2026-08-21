@@ -57,12 +57,36 @@ def _seed_scenarios(now: float) -> list[Scenario]:
                 "- The caller is currently at home."
             ),
             critical_data_points=[
-                CriticalDataPoint(key="incident_description", label="What happened"),
-                CriticalDataPoint(key="vehicle_description", label="Vehicle description"),
-                CriticalDataPoint(key="license_plate", label="License plate"),
-                CriticalDataPoint(key="last_location", label="Last known location"),
-                CriticalDataPoint(key="approx_time", label="Approximate time"),
-                CriticalDataPoint(key="caller_info", label="Caller information"),
+                CriticalDataPoint(
+                    key="incident_description",
+                    label="What happened",
+                    match_hints=["stolen", "theft", "taken", "broke in", "break-in"],
+                ),
+                CriticalDataPoint(
+                    key="vehicle_description",
+                    label="Vehicle description",
+                    match_hints=["toyota", "camry", "sedan", "white"],
+                ),
+                CriticalDataPoint(
+                    key="license_plate",
+                    label="License plate",
+                    match_hints=["plate", "abc123", "alpha bravo charlie"],
+                ),
+                CriticalDataPoint(
+                    key="last_location",
+                    label="Last known location",
+                    match_hints=["shopping center", "parking lot", "parked"],
+                ),
+                CriticalDataPoint(
+                    key="approx_time",
+                    label="Approximate time",
+                    match_hints=["hours ago", "minutes ago", "this morning", "last night"],
+                ),
+                CriticalDataPoint(
+                    key="caller_info",
+                    label="Caller information",
+                    match_hints=["my name is", "this is", "calling from"],
+                ),
             ],
             created_at=now,
             updated_at=now,
@@ -83,12 +107,36 @@ def _seed_scenarios(now: float) -> list[Scenario]:
                 "The caller is anxious and speaking quickly."
             ),
             critical_data_points=[
-                CriticalDataPoint(key="incident_description", label="What is happening right now"),
-                CriticalDataPoint(key="address", label="Address of the disturbance"),
-                CriticalDataPoint(key="injuries", label="Whether anyone is injured"),
-                CriticalDataPoint(key="weapons", label="Whether weapons are involved"),
-                CriticalDataPoint(key="people_involved", label="Number of people involved"),
-                CriticalDataPoint(key="caller_info", label="Caller information"),
+                CriticalDataPoint(
+                    key="incident_description",
+                    label="What is happening right now",
+                    match_hints=["arguing", "yelling", "fighting", "altercation", "screaming"],
+                ),
+                CriticalDataPoint(
+                    key="address",
+                    label="Address of the disturbance",
+                    match_hints=["next door", "apartment", "house", "street"],
+                ),
+                CriticalDataPoint(
+                    key="injuries",
+                    label="Whether anyone is injured",
+                    match_hints=["injured", "hurt", "bleeding", "not sure if"],
+                ),
+                CriticalDataPoint(
+                    key="weapons",
+                    label="Whether weapons are involved",
+                    match_hints=["weapon", "gun", "knife", "no weapons"],
+                ),
+                CriticalDataPoint(
+                    key="people_involved",
+                    label="Number of people involved",
+                    match_hints=["two people", "couple", "several people", "one person"],
+                ),
+                CriticalDataPoint(
+                    key="caller_info",
+                    label="Caller information",
+                    match_hints=["my name is", "this is", "calling from"],
+                ),
             ],
             created_at=now,
             updated_at=now,
@@ -109,12 +157,36 @@ def _seed_scenarios(now: float) -> list[Scenario]:
                 "The caller is one of the drivers involved."
             ),
             critical_data_points=[
-                CriticalDataPoint(key="incident_description", label="What happened"),
-                CriticalDataPoint(key="location", label="Exact location / intersection"),
-                CriticalDataPoint(key="injuries", label="Whether anyone is injured"),
-                CriticalDataPoint(key="vehicles_involved", label="Number of vehicles involved"),
-                CriticalDataPoint(key="road_blocked", label="Whether the road is blocked"),
-                CriticalDataPoint(key="caller_info", label="Caller information"),
+                CriticalDataPoint(
+                    key="incident_description",
+                    label="What happened",
+                    match_hints=["collision", "crash", "accident", "hit"],
+                ),
+                CriticalDataPoint(
+                    key="location",
+                    label="Exact location / intersection",
+                    match_hints=["intersection", "street", "avenue", "highway"],
+                ),
+                CriticalDataPoint(
+                    key="injuries",
+                    label="Whether anyone is injured",
+                    match_hints=["injured", "hurt", "neck pain", "pain", "not injured"],
+                ),
+                CriticalDataPoint(
+                    key="vehicles_involved",
+                    label="Number of vehicles involved",
+                    match_hints=["two vehicles", "two cars", "one vehicle", "three cars"],
+                ),
+                CriticalDataPoint(
+                    key="road_blocked",
+                    label="Whether the road is blocked",
+                    match_hints=["blocking", "blocked", "lane", "not blocking"],
+                ),
+                CriticalDataPoint(
+                    key="caller_info",
+                    label="Caller information",
+                    match_hints=["my name is", "this is", "calling from"],
+                ),
             ],
             created_at=now,
             updated_at=now,
@@ -233,6 +305,10 @@ class SQLiteScenarioStore(ScenarioPort):
 
     @staticmethod
     def _from_row(row) -> Scenario:
+        # `CriticalDataPoint(**point)` es retrocompatible por diseño: filas guardadas antes de
+        # que `match_hints` existiera no tienen esa clave en el JSON, y el dataclass usa su
+        # default (`[]`) para el kwarg faltante — no requiere migración de datos ni tocar el
+        # `_SCHEMA` de la tabla (ver TODO-20 sobre por qué evitar `ALTER TABLE` acá).
         return Scenario(
             id=row[0],
             title=row[1],

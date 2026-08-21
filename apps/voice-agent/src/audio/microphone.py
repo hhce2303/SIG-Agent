@@ -103,7 +103,7 @@ class MicrophoneRecorder(MicrophonePort):
 
         input("Press ENTER to start speaking...")
 
-        print("🎤 Listening... Press ENTER when finished.")
+        print("Listening... Press ENTER when finished.")
 
         frames = []
 
@@ -143,6 +143,11 @@ class MicrophoneRecorder(MicrophonePort):
             self.sample_rate,
         )
 
-        print(f"💾 Audio saved to: {output_path}")
+        # Sin emoji a propósito (encontrado en una sesión de pruebas reales): la consola de
+        # Windows en su codepage por default (cp1252) no puede codificar U+1F4BE y este print
+        # tumbaba `stop_recording()` con UnicodeEncodeError — el servidor lo capturaba como
+        # "No speech was detected", enmascarando el crash real como si fuera un problema de voz
+        # del supervisor. Mismo bug que ya se corrigió en `server_main.py::build_uvicorn_kwargs`.
+        print(f"Audio saved to: {output_path}")
 
         return output_path

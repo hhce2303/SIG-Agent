@@ -78,16 +78,54 @@ ver la sección "Organizacional (bloqueante, no técnico)" del
 El hito de cierre de fase no se puede marcar `DONE` solo con trabajo de código mientras estos
 sigan `PENDING`.
 
+## Sesión 6 (2026-08-20) — Gate 0 + primera corrida de punta a punta real
+
+Primera vez que este proyecto corre contra hardware/API real de punta a punta (hasta ahora todo
+`test_server_app.py` usaba stubs de STT/TTS/LLM/mic, ver "Verificación" abajo).
+
+- **Gate 0 (TODO-08): spike de latencia corrido, resultado real documentado en
+  [TODOS.md#todo-08](./TODOS.md#todo-08).** NFR-01 **no se cumple** hoy: 5622ms de media medida
+  (objetivo <1500ms) en la máquina confirmada por el usuario como la caja RTX candidata (RTX
+  3050 6GB). Hallazgo adicional: `torch.cuda.is_available()` es `False` en este entorno —
+  Whisper/Kokoro corrieron 100% en CPU pese a la GPU física, por falta del runtime de CUDA
+  (`cublas64_12.dll`), no por config. Faltan todavía el spike de red con una segunda máquina y
+  el user-test de 2-3 supervisores reales — TODO-08 queda `IN PROGRESS`, no `RESOLVED`.
+- **TODO-09 (causa raíz), TODO-03 (dueño de la caja), TODO-04 (retención), TODO-05
+  (cumplimiento regulatorio) resueltos por decisión del usuario** — ver el detalle y las
+  actualizaciones de cada uno en [TODOS.md](./TODOS.md).
+- **3 bugs reales de crash encontrados y corregidos, los tres de la misma familia** (emoji en un
+  `print()` + consola de Windows en codepage `cp1252`, que no puede codificarlos):
+  - `server_main.py::build_uvicorn_kwargs` — crasheaba **antes de arrancar uvicorn** en el
+    escape hatch `DISABLE_TLS=1` que la propia documentación recomienda para desarrollo local.
+  - `audio/microphone.py::_save` — crasheaba dentro de `stop_recording()`, y el servidor lo
+    capturaba como *"No speech was detected"*, enmascarando un crash real como un problema de
+    voz del supervisor (encontrado en vivo, durante la corrida real de abajo).
+  - `core/conversation.py` (4 sitios) — el prototipo CLI, fallback de NFR-03, tenía el mismo
+    problema — el fallback manual tampoco funcionaba en Windows hasta este fix.
+- **Primera llamada de punta a punta real** (servidor real `server_main.py` con
+  Whisper+Claude+Kokoro+mic reales, sin stubs; frontend real vía navegador contra el mismo
+  backend; voz real del usuario, no un fixture): 2 turnos reales completos, transcript real,
+  respuesta real de Claude en personaje, TTS real reproducido, sesión persistida con score real.
+  Cierra el punto pendiente que esta misma sección pedía en la sesión 5 ("una llamada real de
+  punta a punta... no disponible en este entorno").
+- **Hallazgo de la llamada real, no un bug de crash sino de precisión del scoring:** ver
+  [TODO-17](./TODOS.md#todo-17) — la heurística de completitud no reconoció datos que el
+  operador sí comunicó correctamente (descripción del vehículo, ubicación, tiempo aproximado),
+  solo por no repetir el texto literal del label del dato. Documentado con la evidencia real
+  exacta (transcript + scores), no como sospecha.
+
 ## Próxima sesión de trabajo (sugerido, no comprometido)
 
 **Nota (sesión 5):** los 4 ítems que este documento sugería antes de la sesión 5 ya están
 resueltos (frontend existente y ahora cableado al protocolo real, timeout de Claude, logging de
 latencia) — ver [PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md) para el detalle. Lo que queda:
 
-1. Confirmar si el spike de Gate 0 (TODO-08) ya corrió fuera de este repo o sigue pendiente —
-   sigue sin evidencia de haberse corrido. Condiciona si ADR-0004 (servidor LAN) y ADR-0005
-   (VAD sin barge-in, todavía sin implementar de verdad — ver TODO en `core/turn_state.py`)
-   siguen siendo la base correcta.
+1. **Actualizado en sesión 6:** el spike de latencia de Gate 0 (TODO-08) ya corrió con resultado
+   real — NFR-01 no se cumple hoy, ver la sección de sesión 6 arriba y
+   [TODOS.md#todo-08](./TODOS.md#todo-08). Falta todavía el spike de red con una segunda
+   máquina y el user-test con 2-3 supervisores reales antes de poder cerrar TODO-08 del todo.
+   Repara el runtime de CUDA en este entorno (falta `cublas64_12.dll`) y re-mide con GPU real
+   antes de tomar cualquier decisión definitiva sobre ADR-0004 a partir de estos números.
 2. Instalar el certificado autofirmado en el almacén de confianza real de las máquinas de
    supervisor (o poner un reverse proxy con cert real) — el cliente Electron hoy confía en
    cualquier cert como parche temporal (`frontend/electron/main.cjs`), no es la solución final.
@@ -132,3 +170,11 @@ latencia) — ver [PHASE2-PROGRESS.md](./PHASE2-PROGRESS.md) para el detalle. Lo
   para el detalle completo. 89 tests de backend en total, todos verdes; frontend con
   `tsc --noEmit` y `vite build` en verde (no hay framework de test de frontend en el repo
   todavía).
+- **2026-08-20 (sesión 6):** Gate 0 (spike de latencia real, resultado documentado) + primera
+  corrida de punta a punta contra hardware/API real (Whisper+Claude+Kokoro+mic reales, voz real
+  del usuario) + 3 bugs de crash por encoding en Windows encontrados y corregidos
+  (`server_main.py`, `audio/microphone.py`, `core/conversation.py`) + fix de CORS en
+  `server/app.py` (encontrado en la sesión anterior de conexión frontend-backend) + TODO-03,
+  TODO-04, TODO-05, TODO-09 resueltos por decisión del usuario + TODO-17 nuevo (heurística de
+  completitud no reconoce habla natural real, con evidencia). Ver la sección de sesión 6 arriba
+  para el detalle completo. 106 tests de backend en total, todos verdes.

@@ -4,12 +4,21 @@ export type ScenarioSummary = {
   category: string
   description: string
   difficulty: string
+  // docs/designs/escenarios-de-video.md — deriva de si el escenario tiene un ScenarioVideo
+  // adjunto en el backend; `Scenario` en sí no cambió (ver ADR-0009/ADR-0010).
+  has_video: boolean
 }
 
 // Fase 2 (roadmap, TODO-11 resuelto: campos estructurados + narrativa libre). `ScenarioSummary`
 // arriba sigue siendo exactamente lo que ya manda `scenarios.data` por WS (sin romper el
 // contrato) — esto es lo que agrega el editor CRUD nuevo, servido por REST.
-export type CriticalDataPointDef = { key: string; label: string; required: boolean }
+export type CriticalDataPointDef = {
+  key: string
+  label: string
+  required: boolean
+  // TODO-17 — frases de contenido real esperadas (no el label de UI), ver core/scoring.py.
+  match_hints: string[]
+}
 
 export type ScenarioDetail = ScenarioSummary & {
   language: string
@@ -27,6 +36,43 @@ export type ScenarioInput = {
   description: string
   briefing: string
   critical_data_points: CriticalDataPointDef[]
+}
+
+// Escenarios de video — docs/designs/escenarios-de-video.md, ADR-0009/ADR-0010.
+export type VideoGroundTruthPointDef = {
+  key: string
+  label: string
+  match_hints: string[]
+  visible_from_seconds: number
+  visible_to_seconds: number
+  required: boolean
+}
+
+// Lo que ve el entrenando antes de la llamada — SIN match_hints/timestamps (ver ADR-0010,
+// nunca se manda la respuesta correcta antes de que hable).
+export type ScenarioVideoAccess = {
+  content_type: string
+  duration_seconds: number
+  stream_url: string
+}
+
+// Vista de autoría (editor) — SÍ incluye match_hints/timestamps.
+export type ScenarioVideoDetail = {
+  scenario_id: string
+  video_path: string
+  video_checksum: string
+  duration_seconds: number
+  content_type: string
+  ground_truth_points: VideoGroundTruthPointDef[]
+  created_at: number
+  updated_at: number
+}
+
+export type ScenarioVideoInput = {
+  video_path: string
+  duration_seconds: number
+  content_type: string
+  ground_truth_points: VideoGroundTruthPointDef[]
 }
 
 export type TranscriptEntry = { role: 'operator' | 'dispatcher'; text: string; seconds: number }
@@ -48,6 +94,11 @@ export type Evaluation = {
   strengths: string[]
   improvements: string[]
   summary: string
+  // Escenarios de video (ADR-0010) — `undefined` en sesiones históricas persistidas ANTES de
+  // este campo, `null` cuando la sesión actual no tuvo video o nunca mandó `video.ended` antes
+  // de `call.start`. Ninguno de los dos casos es "0 segundos" — tratar como "no aplica", nunca
+  // mostrar un cronómetro en 0 (ver hallazgo de diseño sobre no puntuar esto como reflejos).
+  video_reaction_seconds?: number | null
 }
 
 export type TrainingSession = {
@@ -128,3 +179,7 @@ export type EngineCommand =
   | { command: 'call.end' }
   | { command: 'recording.start' }
   | { command: 'recording.stop' }
+  // Escenarios de video — mandado cuando el video pre-llamada terminó (o se saltó), SIEMPRE
+  // antes de `call.start`, nunca durante la llamada (ver server/app.py, hallazgo de diseño
+  // sobre no auto-avanzar de "terminó el video" a "empezó la llamada").
+  | { command: 'video.ended'; scenarioId: string }

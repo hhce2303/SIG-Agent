@@ -33,11 +33,12 @@ class HmacSessionTokenIssuer(SessionTokenPort):
         self._ttl_seconds = ttl_seconds
         self._clock = clock
 
-    def issue(self, supervisor_id: str, session_id: str) -> str:
+    def issue(self, supervisor_id: str, session_id: str, role: str = "supervisor") -> str:
         payload = {
             "supervisor_id": supervisor_id,
             "session_id": session_id,
             "issued_at": self._clock(),
+            "role": role,
         }
         encoded_payload = self._encode(payload)
         signature = self._sign(encoded_payload)
@@ -62,6 +63,10 @@ class HmacSessionTokenIssuer(SessionTokenPort):
             supervisor_id=payload["supervisor_id"],
             session_id=payload["session_id"],
             issued_at=payload["issued_at"],
+            # ADR-0011: tokens emitidos antes de este campo (o por cualquier issuer viejo en
+            # memoria) no tienen "role" en su payload — default "supervisor" preserva su
+            # comportamiento exacto de antes, nadie se vuelve manager por un token viejo.
+            role=payload.get("role", "supervisor"),
         )
 
     def _sign(self, encoded_payload: bytes) -> str:

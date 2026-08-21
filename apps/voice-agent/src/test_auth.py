@@ -72,3 +72,19 @@ def test_verify_accepts_token_right_at_the_ttl_boundary():
 def test_constructor_rejects_empty_secret_key():
     with pytest.raises(ValueError):
         HmacSessionTokenIssuer(secret_key=b"")
+
+
+def test_role_defaults_to_supervisor_when_not_specified():
+    issuer = HmacSessionTokenIssuer(secret_key=b"test-secret")
+
+    token = issuer.issue(supervisor_id="sup-42", session_id="sess-1")
+
+    assert issuer.verify(token).role == "supervisor"
+
+
+def test_manager_role_round_trips(): # ADR-0011 — gate de rol mínimo para video de incidentes
+    issuer = HmacSessionTokenIssuer(secret_key=b"test-secret")
+
+    token = issuer.issue(supervisor_id="mgr-1", session_id="sess-1", role="manager")
+
+    assert issuer.verify(token).role == "manager"

@@ -1,10 +1,10 @@
-import { AlertCircle, ArrowUpRight, ClipboardCheck, ShieldQuestion, Trash2 } from 'lucide-react'
+import { AlertCircle, ArrowUpRight, ClipboardCheck, Film, ShieldQuestion, Trash2, Upload } from 'lucide-react'
 import { FormEvent, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import AppShell from '../components/AppShell'
-import { createIncident, deleteIncident, getImpactReport, httpBaseFrom, listIncidents, promoteIncidentToScenario } from '../lib/api'
+import { createIncident, deleteIncident, getImpactReport, httpBaseFrom, listIncidents, promoteIncidentToScenario, uploadVideo } from '../lib/api'
 import { useEngineStore } from '../stores/engineStore'
-import type { ImpactReport, IncidentInput, IncidentOutcome } from '../types'
+import type { ImpactReport, IncidentInput, IncidentOutcome, VideoGroundTruthPointDef } from '../types'
 
 const EMPTY_INCIDENT: IncidentInput = {
   occurred_at: Date.now(),
@@ -26,14 +26,26 @@ const EMPTY_INCIDENT: IncidentInput = {
 // autenticada ve esta pantalla, igual que ya pasa con el editor de escenarios.
 export default function ImpactPage() {
   const navigate = useNavigate()
-  const { bridgeUrl, authToken, refreshScenarios } = useEngineStore()
+  const { bridgeUrl, authToken, role, refreshScenarios } = useEngineStore()
   const httpBase = httpBaseFrom(bridgeUrl)
+  const isManager = role === 'manager'  // ADR-0011 — pista de UI; el servidor re-verifica esto
 
   const [incidents, setIncidents] = useState<IncidentOutcome[]>([])
   const [report, setReport] = useState<ImpactReport>()
   const [form, setForm] = useState<IncidentInput>(EMPTY_INCIDENT)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
+
+  // docs/designs/escenarios-de-video.md — adjuntar el video de un incidente real al promoverlo.
+  // Solo managers lo ven (ADR-0011); un supervisor sigue con "Promote to scenario" sin video,
+  // sin cambio de comportamiento.
+  const [videoFormFor, setVideoFormFor] = useState<string>()
+  const [videoPath, setVideoPath] = useState('')
+  const [videoDuration, setVideoDuration] = useState(0)
+  const [videoUploading, setVideoUploading] = useState(false)
+  const [groundTruthPoints, setGroundTruthPoints] = useState<VideoGroundTruthPointDef[]>([
+    { key: '', label: '', match_hints: [], visible_from_seconds: 0, visible_to_seconds: 0, required: true },
+  ])
 
   const reload = () => {
     if (!authToken) return
@@ -68,16 +80,35 @@ export default function ImpactPage() {
     reload()
   }
 
-  const promote = async (id: string) => {
+  const promote = async (id: string, withVideo: boolean) => {
     if (!authToken) return
     try {
-      const scenario = await promoteIncidentToScenario(httpBase, authToken, id)
+      const scenario = await promoteIncidentToScenario(
+        httpBase,
+        authToken,
+        id,
+        withVideo
+          ? {
+              video_path: videoPath.trim(),
+              duration_seconds: videoDuration,
+              content_type: 'video/mp4',
+              ground_truth_points: groundTruthPoints
+                .filter((point) => point.key.trim() && point.label.trim())
+                .map((point) => ({ ...point, key: point.key.trim(), label: point.label.trim() })),
+            }
+          : undefined,
+      )
       refreshScenarios()
       reload()
+      setVideoFormFor(undefined)
       navigate(`/scenarios/${scenario.id}/edit`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to promote this incident to a scenario.')
     }
+  }
+
+  const updateGroundTruthPoint = (index: number, patch: Partial<VideoGroundTruthPointDef>) => {
+    setGroundTruthPoints((points) => points.map((point, i) => (i === index ? { ...point, ...patch } : point)))
   }
 
   if (loading) return <AppShell active="Impact"><p className="empty-copy">Loading real-world impact data…</p></AppShell>
@@ -138,17 +169,102 @@ export default function ImpactPage() {
             <h3>Logged incidents</h3>
             <div className="table-head"><span>Date</span><span>Supervisor</span><span>Category</span><span>Rating</span><span>Actions</span></div>
             {incidents.map((incident) => (
-              <div className="history-row operator-row" key={incident.id}>
-                <span>{new Date(incident.occurred_at).toLocaleDateString()}</span>
-                <span>{incident.supervisor_id}</span>
-                <span>{incident.category || '—'}</span>
-                <b>{incident.outcome_rating}/5</b>
-                <span className="page-actions">
-                  {incident.promoted_scenario_id
-                    ? <button className="secondary-button" onClick={() => navigate(`/scenarios/${incident.promoted_scenario_id}/edit`)}><ArrowUpRight size={15} />View scenario</button>
-                    : <button className="secondary-button" onClick={() => promote(incident.id)}><ArrowUpRight size={15} />Promote to scenario</button>}
-                  <button className="secondary-button" onClick={() => remove(incident.id)}><Trash2 size={15} /></button>
-                </span>
+              <div key={incident.id}>
+                <div className="history-row operator-row">
+                  <span>{new Date(incident.occurred_at).toLocaleDateString()}</span>
+                  <span>{incident.supervisor_id}</span>
+                  <span>{incident.category || '—'}</span>
+                  <b>{incident.outcome_rating}/5</b>
+                  <span className="page-actions">
+                    {incident.promoted_scenario_id ? (
+                      <button className="secondary-button" onClick={() => navigate(`/scenarios/${incident.promoted_scenario_id}/edit`)}><ArrowUpRight size={15} />View scenario</button>
+                    ) : (
+                      <>
+                        <button className="secondary-button" onClick={() => promote(incident.id, false)}><ArrowUpRight size={15} />Promote to scenario</button>
+                        {isManager && (
+                          <button
+                            className="secondary-button"
+                            onClick={() => {
+                              // Estado limpio por incidente — evita que la ruta/duración de un
+                              // video ya subido para OTRO incidente se filtre a este formulario.
+                              setVideoPath('')
+                              setVideoDuration(0)
+                              setGroundTruthPoints([{ key: '', label: '', match_hints: [], visible_from_seconds: 0, visible_to_seconds: 0, required: true }])
+                              setVideoFormFor(videoFormFor === incident.id ? undefined : incident.id)
+                            }}
+                          >
+                            <Film size={15} />Promote with video
+                          </button>
+                        )}
+                      </>
+                    )}
+                    <button className="secondary-button" onClick={() => remove(incident.id)}><Trash2 size={15} /></button>
+                  </span>
+                </div>
+
+                {videoFormFor === incident.id && (
+                  <div className="panel promote-video-form">
+                    <p className="scenario-editor-hint">
+                      Attaches this incident's real video to the new scenario (ADR-0011 — requires the manager role, which the server verifies independently of this UI).
+                    </p>
+                    <div className="video-upload-row">
+                      <input
+                        type="file"
+                        accept="video/mp4,video/quicktime,.mp4,.mov,.m4v"
+                        id={`incident-video-upload-${incident.id}`}
+                        className="video-upload-input"
+                        disabled={videoUploading}
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0]
+                          if (!file || !authToken) return
+                          setVideoUploading(true)
+                          setError(undefined)
+                          try {
+                            const uploaded = await uploadVideo(httpBase, authToken, file)
+                            setVideoPath(uploaded.video_path)
+                            if (uploaded.duration_seconds != null) setVideoDuration(uploaded.duration_seconds)
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'Failed to upload video.')
+                          } finally {
+                            setVideoUploading(false)
+                            e.target.value = ''
+                          }
+                        }}
+                      />
+                      <label htmlFor={`incident-video-upload-${incident.id}`} className="secondary-button video-upload-label">
+                        <Upload size={16} />{videoUploading ? 'Uploading…' : 'Choose video file to upload'}
+                      </label>
+                      {videoPath && !videoUploading && <span className="video-upload-filename">✓ uploaded</span>}
+                    </div>
+                    <div className="scenario-editor-grid">
+                      <label><span>Video file path {videoPath ? '(filled in automatically after upload)' : '(or type a path already on the server)'}</span>
+                        <input placeholder="C:/videos/robbery_001.mp4" value={videoPath} onChange={(e) => setVideoPath(e.target.value)} />
+                      </label>
+                      <label><span>Duration (seconds)</span>
+                        <input type="number" min={1} step="0.1" value={videoDuration || ''} onChange={(e) => setVideoDuration(Number(e.target.value))} />
+                      </label>
+                    </div>
+                    <div className="scenario-points-list">
+                      {groundTruthPoints.map((point, index) => (
+                        <div className="scenario-point-row" key={index}>
+                          <input placeholder="key" value={point.key} onChange={(e) => updateGroundTruthPoint(index, { key: e.target.value })} />
+                          <input placeholder="label (e.g. Suspect clothing)" value={point.label} onChange={(e) => updateGroundTruthPoint(index, { label: e.target.value })} />
+                          <input
+                            placeholder="match hints, comma-separated"
+                            className="scenario-point-hints"
+                            value={point.match_hints.join(', ')}
+                            onChange={(e) => updateGroundTruthPoint(index, { match_hints: e.target.value.split(',').map((h) => h.trim()).filter(Boolean) })}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="page-actions">
+                      <button className="blue-button" disabled={!videoPath.trim() || !videoDuration} onClick={() => promote(incident.id, true)}>
+                        <Film size={16} />Promote with this video
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
             {!incidents.length && <p className="empty-copy">No real incidents logged yet.</p>}

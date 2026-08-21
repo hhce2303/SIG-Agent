@@ -4,7 +4,7 @@ Dominio puro — sin FastAPI, sin SQLite, sin reloj real (todos los timestamps s
 inyectados, igual que en `test_turn_state.py`).
 """
 
-from core.ports import CriticalDataPoint
+from core.ports import CriticalDataPoint, VideoGroundTruthPoint
 from core.scoring import ScoreWeights, score_session
 
 VEHICLE_THEFT_POINTS = [
@@ -105,6 +105,173 @@ def test_custom_weights_change_the_composite_score():
     assert default["overall_score"] != completeness_only["overall_score"]
     # Solo 1/4 de los datos críticos mencionados -> con completitud=100% del peso, ~25.
     assert completeness_only["overall_score"] == 25
+
+
+def test_natural_language_report_without_label_wording_still_scores_low_todo_17():
+    # Documenta el bug de TODO-17 tal como se midió en producción: sin `match_hints`, un reporte
+    # perfecto en lenguaje natural falla porque nunca repite las palabras del `label` de UI.
+    points_without_hints = [
+        CriticalDataPoint(key="incident_description", label="What happened"),
+        CriticalDataPoint(key="vehicle_description", label="Vehicle description"),
+        CriticalDataPoint(key="last_location", label="Last known location"),
+        CriticalDataPoint(key="approx_time", label="Approximate time"),
+    ]
+    transcript = [_operator(
+        "There is a white 2021 Toyota Camry stolen from a shopping center parking lot about "
+        "two hours ago.",
+        at=1010.0,
+    )]
+
+    result = score_session(transcript, points_without_hints, started_at=1000.0, ended_at=1090.0, outcome="ended")
+
+    # "last" (de "Last known location") aparece por casualidad en textos distintos, pero ninguno
+    # de los otros 3 puntos matchea sin hints — reproduce la falla real, no un caso inventado.
+    assert result["category_scores"]["completeness"] < 50
+
+
+def test_match_hints_fix_scores_the_same_natural_language_report_correctly():
+    # Mismo transcript exacto que el test anterior, misma llamada real que documenta TODO-17 —
+    # la única diferencia es que el escenario ahora tiene `match_hints` autorados por el creador
+    # del escenario. Este es el criterio de aceptación del fix de TODO-17.
+    points_with_hints = [
+        CriticalDataPoint(
+            key="incident_description", label="What happened", match_hints=["stolen", "theft"]
+        ),
+        CriticalDataPoint(
+            key="vehicle_description",
+            label="Vehicle description",
+            match_hints=["toyota", "camry"],
+        ),
+        CriticalDataPoint(
+            key="last_location",
+            label="Last known location",
+            match_hints=["shopping center", "parking lot"],
+        ),
+        CriticalDataPoint(
+            key="approx_time", label="Approximate time", match_hints=["hours ago"]
+        ),
+    ]
+    transcript = [_operator(
+        "There is a white 2021 Toyota Camry stolen from a shopping center parking lot about "
+        "two hours ago.",
+        at=1010.0,
+    )]
+
+    result = score_session(transcript, points_with_hints, started_at=1000.0, ended_at=1090.0, outcome="ended")
+
+    assert result["category_scores"]["completeness"] == 100
+    assert result["missing"] == []
+
+
+def test_short_match_hint_works_even_though_the_label_never_appears_in_speech():
+    # El label ("Vehicle Identification Number") no aparece nunca en el transcript, y el
+    # fallback de palabras del label tampoco matchearía nada por sí solo. El hint "vin" (3
+    # caracteres) sí matchea porque los hints no llevan el filtro `len(word) > 3` que aplica al
+    # fallback de palabras sueltas del label — son frases elegidas a propósito, no un label
+    # genérico que necesite ese filtro anti-ruido.
+    point = CriticalDataPoint(
+        key="vin", label="Vehicle Identification Number", match_hints=["vin"]
+    )
+
+    result = score_session(
+        [_operator("It's a 2021 Camry, VIN 1HGCM82633A004352.", at=1010.0)],
+        [point],
+        started_at=1000.0,
+        ended_at=1090.0,
+        outcome="ended",
+    )
+
+    assert result["category_scores"]["completeness"] == 100
+
+
+def test_video_ground_truth_folds_into_the_same_collected_missing_arrays():
+    # ADR-0010/hallazgo de diseño: cobertura de video se pliega en collected/missing, no un
+    # panel/categoría paralela — no hay claves nuevas de "video_collected"/"video_missing".
+    ground_truth = [
+        VideoGroundTruthPoint(
+            key="suspect_clothing",
+            label="What the suspect was wearing",
+            match_hints=["red jacket", "hoodie"],
+            visible_from_seconds=2.0,
+            visible_to_seconds=8.0,
+        ),
+        VideoGroundTruthPoint(
+            key="getaway_vehicle",
+            label="Getaway vehicle",
+            match_hints=["black suv", "suv"],
+            visible_from_seconds=10.0,
+            visible_to_seconds=15.0,
+        ),
+    ]
+    transcript = [_operator("The suspect was wearing a red jacket and fled in a black SUV.", at=1010.0)]
+
+    result = score_session(
+        transcript,
+        critical_data_points=[],
+        started_at=1000.0,
+        ended_at=1090.0,
+        outcome="ended",
+        video_ground_truth=ground_truth,
+    )
+
+    assert result["category_scores"]["completeness"] == 100
+    assert result["missing"] == []
+    assert "video_collected" not in result
+    assert "video_missing" not in result
+
+
+def test_video_reaction_seconds_is_none_without_a_video_scenario():
+    result = score_session(
+        [_operator("License plate ABC123.", at=1010.0)],
+        VEHICLE_THEFT_POINTS,
+        started_at=1000.0,
+        ended_at=1090.0,
+        outcome="ended",
+    )
+
+    assert result["video_reaction_seconds"] is None
+
+
+def test_video_reaction_seconds_measured_from_video_ended_at_not_call_started_at():
+    # El entrenando vio el video, se tomó un café, y arrancó la llamada 10 minutos después
+    # (started_at muy lejos de video_ended_at) — la reacción real es rápida (5s) una vez que
+    # habló, y debe medirse desde que terminó el video, no desde el inicio de la llamada.
+    ground_truth = [
+        VideoGroundTruthPoint(key="weapon", label="Weapon involved", match_hints=["knife"]),
+    ]
+    video_ended_at = 1000.0
+    call_started_at = 1600.0  # 10 minutos después de que terminó el video
+    transcript = [_operator("The suspect had a knife.", at=call_started_at + 5.0)]
+
+    result = score_session(
+        transcript,
+        critical_data_points=[],
+        started_at=call_started_at,
+        ended_at=call_started_at + 90.0,
+        outcome="ended",
+        video_ground_truth=ground_truth,
+        video_ended_at=video_ended_at,
+    )
+
+    # Si esto se midiera (incorrectamente) desde started_at, sería 5.0 igual por casualidad de
+    # este fixture — la aserción real que importa es contra video_ended_at explícitamente.
+    assert result["video_reaction_seconds"] == call_started_at + 5.0 - video_ended_at
+
+
+def test_video_reaction_seconds_is_none_when_ground_truth_is_never_mentioned():
+    ground_truth = [VideoGroundTruthPoint(key="weapon", label="Weapon", match_hints=["knife"])]
+
+    result = score_session(
+        [_operator("I don't remember anything else.", at=1010.0)],
+        critical_data_points=[],
+        started_at=1000.0,
+        ended_at=1090.0,
+        outcome="ended",
+        video_ground_truth=ground_truth,
+        video_ended_at=990.0,
+    )
+
+    assert result["video_reaction_seconds"] is None
 
 
 def test_score_weights_from_env_override_defaults(monkeypatch):

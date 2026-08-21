@@ -10,19 +10,40 @@ claridad 20% / tiempo total 10%): ver `ScoreWeights`. No vive en el dominio de S
 roadmap limita Settings a voz de TTS, esto se ajusta por variables de entorno si hace falta
 re-tunear sin código, no por una pantalla.
 
-Completitud usa coincidencia de palabra clave del `label` de cada `CriticalDataPoint` contra el
-texto de los turnos `operator` — una heurística determinista y testeable, no una segunda llamada
-a Claude (evita costo/latencia/no-determinismo adicional). Documentado como simplificación
-mejorable, no como decisión final de producto — si en el uso real resulta demasiado burda, la
-mejora natural es extracción vía LLM, con su propio análisis de costo/latencia primero.
+Completitud usa coincidencia de palabra clave contra el texto de los turnos `operator` — una
+heurística determinista y testeable, no una segunda llamada a Claude (evita costo/latencia/
+no-determinismo adicional).
+
+**TODO-17 (resuelto parcialmente):** matchear solo contra el `label` de cada `CriticalDataPoint`
+(ej. "Vehicle description") resultó, en una llamada real de punta a punta, en 17/100 de
+completitud sobre un reporte correcto y en lenguaje natural — el label es una etiqueta de UI, no
+vocabulario que un reporte real repita literalmente. El fix: `CriticalDataPoint.match_hints`
+(ver `core/ports.py`) deja que quien autora el escenario liste frases de CONTENIDO esperado (ej.
+`["toyota camry", "camry"]`), matcheadas por substring — no por palabra suelta, porque son frases
+elegidas a propósito, no un label genérico. El matching por palabra del label se mantiene como
+último recurso para escenarios sin `match_hints` todavía (compatibilidad), pero para escenarios
+nuevos se recomienda siempre completar `match_hints`. Esto sigue siendo una heurística
+determinista, no extracción semántica real — si en el uso real resulta insuficiente (ej. el
+entrenando usa una sinonimia que nadie previó), la mejora natural sigue siendo extracción vía
+LLM, con su propio análisis de costo/latencia — no se descartó, solo se resolvió lo barato primero.
 """
 
 import os
 from dataclasses import dataclass
 
-from core.ports import CriticalDataPoint
+from core.ports import CriticalDataPoint, VideoGroundTruthPoint
 
 FILLER_WORDS = {"um", "uh", "like", "you know", "so", "actually", "basically"}
+
+# Ver ADR-0010: escenarios de video (docs/designs/escenarios-de-video.md). `VideoGroundTruthPoint`
+# tiene los mismos campos que `_matches_point` necesita (`label`, `match_hints`) — se puede
+# mezclar con `CriticalDataPoint` en la misma lista de puntos sin ningún cambio en `_completeness`/
+# `_time_to_critical_data`. Esto es deliberado (evita una segunda "pasada" de scoring paralela
+# para video — ver hallazgo de diseño sobre plegar cobertura de video en `collected`/`missing`
+# existentes en vez de un panel nuevo) — un video-scenario simplemente pasa
+# `critical_data_points + video_ground_truth` como los mismos "puntos" de siempre.
+REACTION_TARGET_SECONDS = 15.0  # tiempo "bueno" de reacción tras terminar el video pre-llamada
+REACTION_MAX_SECONDS = 60.0
 
 # Bandas objetivo del motor de scoring — ajustables por env igual que los pesos, sin ADR propio
 # porque son parámetros de calibración, no una decisión arquitectónica.
@@ -58,6 +79,8 @@ def score_session(
     ended_at: float,
     outcome: str,
     weights: ScoreWeights | None = None,
+    video_ground_truth: list[VideoGroundTruthPoint] | None = None,
+    video_ended_at: float | None = None,
 ) -> dict | None:
     """Devuelve un dict con la forma exacta de `Evaluation` (`frontend/src/types.ts`), o `None`.
 
@@ -68,15 +91,25 @@ def score_session(
     terminado temprano con completitud baja — el desglose ya comunica eso; no existe una
     categoría de "abandono deliberado" separada porque el servidor no puede observar esa
     intención de forma confiable, solo si el cliente pidió terminar o si la conexión se cayó.
+
+    Escenarios de video (ver ADR-0010): `video_ground_truth` se mezcla con
+    `critical_data_points` para completitud/tiempo-a-dato-crítico — mismo mecanismo, mismas
+    claves de salida, sin panel/categoría paralela (ver hallazgo de diseño). La única clave
+    nueva es `video_reaction_seconds` (`None` cuando no hay video en esta sesión, o cuando el
+    video nunca terminó de reproducirse antes de la llamada) — las filas de historial ya
+    persistidas no la tienen, y eso es válido: el frontend debe tratar su ausencia como "no
+    aplica", nunca como 0.
     """
 
     if outcome == "network_drop":
         return None
 
     weights = weights or ScoreWeights.from_env()
+    video_ground_truth = video_ground_truth or []
+    all_points = [*critical_data_points, *video_ground_truth]
 
-    completeness, collected, missing = _completeness(transcript, critical_data_points)
-    time_score = _time_to_critical_data(transcript, critical_data_points, started_at)
+    completeness, collected, missing = _completeness(transcript, all_points)
+    time_score = _time_to_critical_data(transcript, all_points, started_at)
     if time_score is None:
         time_score = 100.0  # el escenario no define datos críticos: no penaliza esta categoría
     clarity = _clarity(transcript)
@@ -89,7 +122,8 @@ def score_session(
         + weights.total_time * total_time
     )
 
-    strengths, improvements = _narrative(completeness, time_score, clarity, missing)
+    reaction_seconds = _video_reaction_seconds(transcript, video_ground_truth, video_ended_at)
+    strengths, improvements = _narrative(completeness, time_score, clarity, missing, reaction_seconds)
 
     return {
         "overall_score": round(overall),
@@ -104,6 +138,7 @@ def score_session(
         "strengths": strengths,
         "improvements": improvements,
         "summary": _summary(overall, missing),
+        "video_reaction_seconds": reaction_seconds,
     }
 
 
@@ -119,8 +154,14 @@ def _matches_point(text_lower: str, point: CriticalDataPoint) -> bool:
     if point.label.lower() in text_lower:
         return True
 
-    # Coincidencia permisiva a nivel de palabra — ver docstring del módulo sobre por qué esto es
-    # una heurística y no extracción semántica real.
+    # TODO-17: match_hints son frases de contenido autoradas a propósito (no un label genérico),
+    # así que se comparan por substring completo, sin el requisito de longitud>3 de abajo.
+    if any(hint.strip() and hint.strip().lower() in text_lower for hint in point.match_hints):
+        return True
+
+    # Coincidencia permisiva a nivel de palabra sobre el label — último recurso para escenarios
+    # sin match_hints todavía. Ver docstring del módulo sobre por qué esto es una heurística y no
+    # extracción semántica real.
     return any(len(word) > 3 and word in text_lower for word in point.label.lower().split())
 
 
@@ -160,6 +201,35 @@ def _time_to_critical_data(
     return 0.0  # ningún turno del supervisor mencionó un dato crítico
 
 
+def _video_reaction_seconds(
+    transcript: list[dict], video_ground_truth: list[VideoGroundTruthPoint], video_ended_at: float | None
+) -> float | None:
+    """Segundos entre que terminó el video pre-llamada y la primera mención de cualquier dato de
+    su ground truth (ADR-0010) — anclado a `video_ended_at` (reloj del servidor, sellado por el
+    evento WS `video.ended`), NUNCA a `started_at`/`call.start`: un entrenando puede ver el
+    video, pausar, tomarse un café, y arrancar la llamada después — confundir esos dos relojes
+    fue un hallazgo explícito de la revisión de ingeniería (5c).
+
+    `None` (no un número) cuando no hay escenario de video en esta sesión, o el cliente nunca
+    mandó `video.ended` (por ejemplo: el entrenando tomó el camino de texto en un escenario
+    mixto, o se saltó el video por un error de reproducción) — un `None` es "no aplica", nunca
+    "reaccionó en 0 segundos".
+    """
+
+    if not video_ground_truth or video_ended_at is None:
+        return None
+
+    for turn in _operator_turns(transcript):
+        text_lower = turn.get("text", "").lower()
+        if not any(_matches_point(text_lower, point) for point in video_ground_truth):
+            continue
+
+        elapsed = turn.get("at", video_ended_at) - video_ended_at
+        return max(0.0, elapsed)
+
+    return None  # el entrenando nunca mencionó nada del ground truth de video — sin dato, no 0
+
+
 def _clarity(transcript: list[dict]) -> float:
     words = [word for turn in _operator_turns(transcript) for word in _words(turn.get("text", ""))]
 
@@ -183,7 +253,11 @@ def _total_time(started_at: float, ended_at: float) -> float:
 
 
 def _narrative(
-    completeness: float, time_score: float, clarity: float, missing: list[str]
+    completeness: float,
+    time_score: float,
+    clarity: float,
+    missing: list[str],
+    reaction_seconds: float | None = None,
 ) -> tuple[list[str], list[str]]:
     strengths, improvements = [], []
 
@@ -193,6 +267,16 @@ def _narrative(
         strengths.append("Got to the most critical information quickly.")
     if clarity >= 80:
         strengths.append("Communicated clearly, with minimal filler words.")
+
+    # Nota cualitativa, nunca un número de cronómetro junto al score (hallazgo de diseño: un
+    # "tiempo de reacción" puntuado se siente como un test de reflejos encima de un video
+    # perturbador) — por eso vive como frase en strengths/improvements, no como categoría
+    # ponderada nueva en `category_scores`.
+    if reaction_seconds is not None:
+        if reaction_seconds <= REACTION_TARGET_SECONDS:
+            strengths.append("Reported what the video showed right away, with barely a pause.")
+        elif reaction_seconds >= REACTION_MAX_SECONDS:
+            improvements.append("Take a breath, then report — but don't let too much time pass before calling in what you saw.")
 
     if completeness < 60:
         detail = ", ".join(missing[:3]) if missing else "key details"
