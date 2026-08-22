@@ -55,11 +55,37 @@ retroalimentación" de Fase 3, aprobada explícitamente por el usuario en el Fin
 | Evento `video.ended` (reloj de servidor) | **DONE** | `frontend/src/types.ts::EngineCommand`, `server/app.py` (`elif command == "video.ended"`), con protección contra staleness entre escenarios distintos en la misma conexión WS (`video_ended_scenario_id`). |
 | Cobertura/omisiones de video en el debrief | **DONE, cero UI nueva** | `SessionBreakdown.tsx` no necesitó ningún cambio — `collected`/`missing` ya incluyen los puntos de video por diseño del backend (ver tabla de arquitectura arriba). |
 
+## Actualización — upload real de video (ADR-0012)
+
+El recorte de v1 ("Scope Decision" en escenarios-de-video.md: video colocado manualmente en
+disco por un administrador) resultó impracticable en el uso real — el usuario reportó
+explícitamente no tener manera de subir un video ni crear un escenario con video. Se construyó
+upload real en la misma sesión:
+
+| Ítem | Estado | Evidencia |
+|---|---|---|
+| Upload real (`POST /videos/upload`) | **DONE** | `server/app.py::upload_video` — nombre de archivo generado por el servidor (nunca el del cliente, Eng 4.3), allowlist de extensión (`.mp4`/`.mov`/`.m4v`, 415 si no), límite de tamaño (`VIDEO_MAX_UPLOAD_BYTES`, 413 si excede), write-temp→rename atómico (Eng 2.2). No scopeado a un escenario — lo usan tanto el editor (escenario ya existe) como la promoción de incidentes (escenario recién se crea). `test_server_video.py` (8 tests nuevos). |
+| Detección de duración sin dependencia nueva | **DONE, best-effort** | `server/video_probe.py` — parser propio del box `moov/mvhd` (MP4/MOV), sin ffmpeg/ffprobe/moviepy. `None` si no se puede detectar (fallback manual, no error). `test_video_probe.py` (9 tests con MP4 sintéticos). |
+| Cascade-delete solo de archivos que subimos nosotros | **DONE** | `server/app.py::_delete_owned_video_file` — nunca borra una referencia manual de v1 fuera de `video_storage_dir`. |
+| UI de upload | **DONE** | `ScenarioEditorPage.tsx` y `ImpactPage.tsx` (promote-with-video) — file picker + botón, llena `video_path`/duración automáticamente; el campo de texto manual de v1 sigue existiendo como fallback. |
+
+Ver [ADR-0012](./adr/0012-upload-real-de-video-de-escenarios.md).
+
+## Actualización — ver el video durante la llamada (pedido explícito del usuario)
+
+El plan original (y la revisión de diseño de `/autoplan`) recomendó que el video desapareciera
+al empezar la llamada, para no convertir el ejercicio en "leer en voz alta" en vez de reportar
+de memoria. El usuario pidió explícitamente la opción de poder verlo también durante la
+simulación. Se implementó como una opción que el entrenando activa (cerrada por default, un
+botón flotante "Watch video again" durante la llamada) — mantiene la preocupación de diseño
+original (no se pone en pantalla sin pedirlo) sin bloquear lo que el usuario pidió.
+
+| Ítem | Estado | Evidencia |
+|---|---|---|
+| Panel de video opcional durante la llamada | **DONE** | `frontend/src/components/InCallVideoPanel.tsx`, montado desde `CallPage.tsx` cuando el escenario activo tiene video. `videoAccess` ahora se mantiene en el store durante toda la llamada (antes se limpiaba al arrancarla) — `engineStore.ts::clearVideoAccess` se llama explícitamente en la rama sin-video del gate para evitar que el video de una llamada anterior se filtre a un escenario nuevo sin video. |
+
 ## Deliberadamente no construido en esta sesión
 
-- **Upload de video por UI.** v1 usa una ruta de archivo colocada manualmente en disco por un
-  administrador (`video_path` en el editor) — recorte de alcance explícito del plan aprobado, no
-  un olvido. Ver "Scope Decision" en escenarios-de-video.md.
 - **Extracción automática de ground truth por IA de visión.** Approach B del plan, rechazada por
   falta de evidencia de demanda y por agregar un modo de falla nuevo — ver ADR-0010.
 - **Replay del video durante el debrief.** El hallazgo de diseño lo marcó "si se muestra, opt-in
@@ -72,10 +98,11 @@ retroalimentación" de Fase 3, aprobada explícitamente por el usuario en el Fin
 
 ## Cobertura de tests
 
-156 → 158 tests en `apps/voice-agent/src/` (todos verdes), + `frontend`: `tsc --noEmit` y
+156 → 176 tests en `apps/voice-agent/src/` (todos verdes), + `frontend`: `tsc --noEmit` y
 `vite build` limpios. Archivos nuevos: `test_scenario_videos.py`, `test_video_token.py`,
-`test_video_streaming.py`, `test_server_video.py`, `test_shared_sqlite_topology.py`. Extendidos:
-`test_scoring.py`, `test_scenarios.py`, `test_auth.py`.
+`test_video_streaming.py`, `test_video_probe.py`, `test_server_video.py`,
+`test_shared_sqlite_topology.py`. Extendidos: `test_scoring.py`, `test_scenarios.py`,
+`test_auth.py`.
 
 ## ADRs de esta sesión
 
@@ -84,6 +111,8 @@ retroalimentación" de Fase 3, aprobada explícitamente por el usuario en el Fin
   scoring de video (reusa `match_hints`, no LLM todavía).
 - [ADR-0011](./adr/0011-gate-de-rol-minimo-video-de-incidentes.md) — gate de rol mínimo
   (manager) antes de exponer video real de incidentes.
+- [ADR-0012](./adr/0012-upload-real-de-video-de-escenarios.md) — upload real de video,
+  reemplaza la referencia manual de path de v1 (sobre feedback directo del usuario).
 
 ## Nota sobre control de versiones
 

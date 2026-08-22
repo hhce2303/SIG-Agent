@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import Header from '../components/Header'
+import InCallVideoPanel from '../components/InCallVideoPanel'
 import PreCallVideoGate from '../components/PreCallVideoGate'
 import Waveform from '../components/Waveform'
 import { httpBaseFrom } from '../lib/api'
@@ -22,8 +23,13 @@ export default function CallPage() {
   // Escenarios de video (docs/designs/escenarios-de-video.md): un solo lugar decide cuándo se
   // manda `call.start` — ni HomePage.tsx ni ScenariosPage.tsx lo hacen más (hallazgo de diseño
   // #1). `gateResolved` es "ya sabemos si hay video que mostrar, o no" — antes de saberlo no se
-  // manda `call.start` ni se muestra nada, para no parpadear entre estados.
+  // manda `call.start` ni se muestra nada, para no parpadear entre estados. `gateDismissed` es
+  // distinto de "videoAccess dejó de existir" — el store SIGUE con el `videoAccess` de esta
+  // sesión durante toda la llamada a propósito (pedido explícito del usuario: poder re-ver el
+  // video durante la simulación, ver InCallVideoPanel.tsx), solo deja de mostrarse pantalla
+  // completa una vez que el entrenando confirma "Start Call" en el interstitial.
   const [gateResolved, setGateResolved] = useState(false)
+  const [gateDismissed, setGateDismissed] = useState(false)
   const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId)
 
   useEffect(() => {
@@ -35,7 +41,15 @@ export default function CallPage() {
 
     let cancelled = false
     ;(async () => {
-      const access = selectedScenario?.has_video ? await loadVideoAccess(selectedScenarioId) : null
+      let access = null
+      if (selectedScenario?.has_video) {
+        access = await loadVideoAccess(selectedScenarioId)
+      } else {
+        // Sin esto, un `videoAccess` de la llamada ANTERIOR (se mantiene en el store a
+        // propósito durante toda una llamada, ver comentario de arriba) se filtraría al panel
+        // en vivo de este escenario nuevo, que no tiene video.
+        clearVideoAccess()
+      }
       if (cancelled) return
       setGateResolved(true)
       if (!access) startCall()  // hallazgo de diseño #2: sin video, seguir directo al flujo de hoy
@@ -54,13 +68,13 @@ export default function CallPage() {
     if (lastSession?.status === 'completed') navigate('/review')
   }, [lastSession, navigate])
 
-  if (videoAccess) {
+  if (videoAccess && !gateDismissed) {
     return (
       <PreCallVideoGate
         scenarioTitle={selectedScenario?.title ?? 'Training Session'}
         streamUrl={`${httpBaseFrom(bridgeUrl)}${videoAccess.stream_url}`}
         onVideoEnded={() => notifyVideoEnded(selectedScenarioId)}
-        onStartCall={() => { clearVideoAccess(); startCall() }}
+        onStartCall={() => { setGateDismissed(true); startCall() }}
       />
     )
   }
@@ -119,6 +133,11 @@ export default function CallPage() {
         <div className="device connection"><AudioLines size={28} /><div><strong>Voice Engine</strong><span className={connection === 'connected' ? 'success-text' : ''}><i className={`status-dot ${connection === 'connected' ? 'success' : 'warning'}`} />{connection}</span></div></div>
         <button className="danger-button" disabled={!['connected', 'paused', 'processing'].includes(callStatus)} onClick={endCall}><PhoneOff size={22} />End Call</button>
       </footer>
+
+      {/* Pedido explícito del usuario: opción de ver el video DURANTE la llamada, no solo
+          antes. Cerrado por default a propósito (ver InCallVideoPanel.tsx) — el entrenando lo
+          abre si lo necesita, no se le pone en pantalla sin pedirlo. */}
+      {videoAccess && <InCallVideoPanel streamUrl={`${httpBaseFrom(bridgeUrl)}${videoAccess.stream_url}`} />}
     </div>
   )
 }

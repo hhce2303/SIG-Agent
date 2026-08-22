@@ -8,6 +8,8 @@
 apps/voice-agent/src/server.crt
 apps/voice-agent/src/server.key
 apps/voice-agent/src/sessions.db
+# ADR-0012 — archivos de video subidos por escenario; nunca committear video real de casos.
+apps/voice-agent/src/video_storage/
 .pytest_cache/
 __pycache__/
 *.pyc
