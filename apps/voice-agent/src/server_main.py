@@ -28,6 +28,10 @@ Opcionales:
 - `VIDEO_STORAGE_DIR` (default `./video_storage`) — carpeta donde `POST /video/upload` guarda
   los archivos subidos (ADR-0012, reemplaza tener que colocarlos a mano). Se crea si no existe.
 - `VIDEO_MAX_UPLOAD_BYTES` (default 2 GiB) — límite de tamaño por archivo subido.
+- `METRICS_JUDGE_ENABLED` (default `1`) — motor de métricas (docs/designs/motor-de-metricas.md):
+  `0` apaga el juez LLM de coherencia/calidad de inglés post-llamada sin revertir el resto del
+  plan (latencia de turno y confianza de transcripción siguen activas — son puras, bajo riesgo).
+  Reusa `ANTHROPIC_API_KEY`/`CLAUDE_MODEL`, las mismas credenciales que ya usa el dispatcher.
 """
 
 import os
@@ -40,11 +44,13 @@ from auth.session_token import HmacSessionTokenIssuer
 from auth.video_token import HmacVideoTokenIssuer
 from core.observability import configure_logging
 from llm.claude import ClaudeDispatcher
+from llm.metrics_judge import ClaudeMetricsJudge
 from persistence.sqlite_incident_store import SQLiteIncidentStore
 from persistence.sqlite_scenario_store import SQLiteScenarioStore
 from persistence.sqlite_scenario_video_store import SQLiteScenarioVideoStore
 from persistence.sqlite_settings_store import SQLiteSettingsStore
 from persistence.sqlite_store import SQLiteSessionStore
+from persistence.sqlite_stt_metrics_store import SQLiteSttMetricsStore
 from server.app import create_app
 from server.tls import ensure_self_signed_cert
 from stt.whisper import WhisperSTT
@@ -92,6 +98,22 @@ def build_app():
         # ADR-0012: upload real de video — reemplaza tener que colocar el archivo a mano.
         video_storage_dir=os.getenv("VIDEO_STORAGE_DIR", "video_storage"),
         video_max_upload_bytes=int(os.getenv("VIDEO_MAX_UPLOAD_BYTES", str(2 * 1024**3))),
+        # T13/Fase 1 Sección 9 (docs/designs/motor-de-metricas.md): feature flag recomendado
+        # específicamente para el judge (no para latencia/confianza de transcripción, que son
+        # de bajo riesgo) — `METRICS_JUDGE_ENABLED=0` lo apaga sin revertir el resto del plan si
+        # aparece un problema de costo/latencia/calidad en producción. Prendido por default,
+        # reusa las mismas credenciales que ya configura `ClaudeDispatcher`.
+        metrics_judge=(
+            ClaudeMetricsJudge(
+                api_key=os.environ["ANTHROPIC_API_KEY"],
+                model=os.environ["CLAUDE_MODEL"],
+            )
+            if os.getenv("METRICS_JUDGE_ENABLED", "1") == "1"
+            else None
+        ),
+        # T4: mismo archivo compartido que el resto (ver TODO-20 sobre por qué nunca se altera
+        # `sessions`/`scenarios` — tabla nueva en su lugar).
+        stt_metrics_store=SQLiteSttMetricsStore(sessions_db_path),
     )
 
 

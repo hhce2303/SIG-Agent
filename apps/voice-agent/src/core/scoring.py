@@ -32,6 +32,8 @@ import os
 from dataclasses import dataclass
 
 from core.ports import CriticalDataPoint, VideoGroundTruthPoint
+from core.turn_latency import compute_response_latency, rate_response_latency
+from core.turn_state import TurnTransition
 
 FILLER_WORDS = {"um", "uh", "like", "you know", "so", "actually", "basically"}
 
@@ -81,8 +83,18 @@ def score_session(
     weights: ScoreWeights | None = None,
     video_ground_truth: list[VideoGroundTruthPoint] | None = None,
     video_ended_at: float | None = None,
+    turn_history: list[TurnTransition] | None = None,
 ) -> dict | None:
     """Devuelve un dict con la forma exacta de `Evaluation` (`frontend/src/types.ts`), o `None`.
+
+    `communication_coaching` (docs/designs/motor-de-metricas.md, Fase 2 Pass 1 — corregido tras
+    la voz independiente de diseño): panel cualitativo nuevo, separado de `category_scores` a
+    propósito — `category_scores` es una fórmula ponderada ya confirmada con el usuario
+    (`TODO-10` RESOLVED) y no se reabre. `response_latency` se computa aquí, puro, a partir de
+    `turn_history` (ya sellado por `TurnStateMachine`, ver `core/turn_latency.py`).
+    `transcription_confidence`/`coherence`/`english_quality` quedan en `None` — los completa
+    `finish_call` (`server/app.py`) después de esta función, porque dependen del juez LLM
+    (`llm/metrics_judge.py`, adaptador con red — no puede vivir en este módulo puro, ADR-0006).
 
     `None` únicamente cuando `outcome == "network_drop"` (roadmap: "puntaje diferenciado —
     abandono deliberado vs. caída de red"): una sesión cortada por la red no se puntúa de forma
@@ -124,6 +136,7 @@ def score_session(
 
     reaction_seconds = _video_reaction_seconds(transcript, video_ground_truth, video_ended_at)
     strengths, improvements = _narrative(completeness, time_score, clarity, missing, reaction_seconds)
+    response_latency = rate_response_latency(compute_response_latency(turn_history or []))
 
     return {
         "overall_score": round(overall),
@@ -139,6 +152,12 @@ def score_session(
         "improvements": improvements,
         "summary": _summary(overall, missing),
         "video_reaction_seconds": reaction_seconds,
+        "communication_coaching": {
+            "response_latency": response_latency,
+            "transcription_confidence": None,
+            "coherence": None,
+            "english_quality": None,
+        },
     }
 
 

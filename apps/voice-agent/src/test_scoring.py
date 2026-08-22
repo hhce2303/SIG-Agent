@@ -6,6 +6,7 @@ inyectados, igual que en `test_turn_state.py`).
 
 from core.ports import CriticalDataPoint, VideoGroundTruthPoint
 from core.scoring import ScoreWeights, score_session
+from core.turn_state import TurnState, TurnTransition
 
 VEHICLE_THEFT_POINTS = [
     CriticalDataPoint(key="incident_description", label="What happened"),
@@ -283,3 +284,51 @@ def test_score_weights_from_env_override_defaults(monkeypatch):
     weights = ScoreWeights.from_env()
 
     assert weights == ScoreWeights(completeness=1.0, time_to_critical_data=0.0, clarity=0.0, total_time=0.0)
+
+
+# --- communication_coaching (T1, docs/designs/motor-de-metricas.md) -----------------------------
+# Panel nuevo, separado de `category_scores` (fórmula ponderada ya cerrada, TODO-10) — ver Fase 2
+# Pass 1 de la revisión. `category_scores`/`overall_score` NUNCA cambian con estos tests.
+
+
+def test_communication_coaching_present_but_empty_without_turn_history():
+    result = score_session([], VEHICLE_THEFT_POINTS, started_at=1000.0, ended_at=1010.0, outcome="ended")
+
+    assert result["communication_coaching"] == {
+        "response_latency": None,
+        "transcription_confidence": None,
+        "coherence": None,
+        "english_quality": None,
+    }
+
+
+def test_communication_coaching_response_latency_computed_from_turn_history():
+    history = [
+        TurnTransition(TurnState.DISPATCHER_SPEAKING, TurnState.LISTENING, "dispatcher_finished_speaking", at=1005.0),
+        TurnTransition(TurnState.LISTENING, TurnState.SUPERVISOR_SPEAKING, "supervisor_started_speaking", at=1007.0),
+    ]
+
+    result = score_session(
+        [], VEHICLE_THEFT_POINTS, started_at=1000.0, ended_at=1010.0, outcome="ended", turn_history=history
+    )
+
+    latency = result["communication_coaching"]["response_latency"]
+    assert latency["average_ms"] == 2000
+    assert latency["rating"] == "good"
+    # category_scores/overall_score no se tocan por agregar turn_history — contrato cerrado. Se
+    # compara contra una llamada idéntica sin turn_history: debe dar exactamente el mismo dict.
+    baseline = score_session([], VEHICLE_THEFT_POINTS, started_at=1000.0, ended_at=1010.0, outcome="ended")
+    assert result["category_scores"] == baseline["category_scores"]
+    assert result["overall_score"] == baseline["overall_score"]
+
+
+def test_communication_coaching_judge_fields_stay_none_until_finish_call_fills_them():
+    # score_session es puro (ADR-0006) — nunca llama al judge. `coherence`/`english_quality`/
+    # `transcription_confidence` los completa `finish_call` (server/app.py) después, con el
+    # resultado del adaptador async (`llm/metrics_judge.py`).
+    result = score_session([], VEHICLE_THEFT_POINTS, started_at=1000.0, ended_at=1010.0, outcome="ended")
+
+    coaching = result["communication_coaching"]
+    assert coaching["transcription_confidence"] is None
+    assert coaching["coherence"] is None
+    assert coaching["english_quality"] is None

@@ -37,8 +37,14 @@ class VoiceConversation:
         # 2. Speech → Text
         # -------------------------
 
-        text = self.stt.transcribe(audio_path)
+        result = self.stt.transcribe(audio_path)
+        text = result.text
 
+        # T2/T12 (docs/designs/motor-de-metricas.md): `transcribe()` ahora devuelve
+        # `TranscriptionResult` (dataclass), no un `str` — un dataclass no tiene `__bool__`/
+        # `__len__`, así que `if not result:` sería siempre falso y esta rama nunca se
+        # ejecutaría. Chequear explícitamente `.text` (hallazgo de la voz independiente de
+        # ingeniería en la revisión de `/autoplan`, Fase 3 Sección 2).
         if not text:
             # Sin emoji a propósito (encontrado en una sesión de pruebas reales): la consola de
             # Windows en su codepage por default (cp1252) no puede codificar estos caracteres y

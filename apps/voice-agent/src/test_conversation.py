@@ -10,7 +10,7 @@ proceso.
 """
 
 from core.conversation import DISPATCHER_RECOVERY_LINE, VoiceConversation
-from core.ports import DispatcherError
+from core.ports import DispatcherError, TranscriptionResult
 
 
 class StubMicrophone:
@@ -19,11 +19,15 @@ class StubMicrophone:
 
 
 class StubSTT:
+    """T2/T12 (docs/designs/motor-de-metricas.md): devuelve `TranscriptionResult`, no un `str` —
+    uno de los 2 stubs adicionales que la voz independiente de ingeniería encontró fuera de la
+    lista original de archivos a migrar (el otro es `test_server_app.py::StubSTT`)."""
+
     def __init__(self, text: str = "A white Camry was stolen from the lot."):
         self.text = text
 
-    def transcribe(self, audio_path: str) -> str:
-        return self.text
+    def transcribe(self, audio_path: str) -> TranscriptionResult:
+        return TranscriptionResult(text=self.text, segments=[])
 
 
 class StubTTS:

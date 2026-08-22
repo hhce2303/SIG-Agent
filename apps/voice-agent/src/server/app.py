@@ -38,6 +38,8 @@ from core.ports import (
     IncidentOutcomePort,
     InvalidSessionTokenError,
     InvalidVideoTokenError,
+    MetricsJudgeError,
+    MetricsJudgePort,
     MicrophonePort,
     PersistencePort,
     Scenario,
@@ -49,11 +51,13 @@ from core.ports import (
     SessionTokenPort,
     SettingsPort,
     SpeechToTextPort,
+    SttMetricsPort,
     TextToSpeechPort,
     VideoGroundTruthPoint,
     VideoTokenPort,
 )
 from core.scoring import score_session
+from core.transcription_confidence import aggregate_transcription_confidence, rate_transcription_confidence
 from core.turn_state import InvalidTurnTransitionError, TurnStateMachine
 from server.video_probe import probe_mp4_duration_seconds
 from server.video_streaming import iter_file_range, parse_range_header
@@ -234,6 +238,14 @@ def create_app(
     manager_passphrase: str = "",
     video_storage_dir: str | None = None,
     video_max_upload_bytes: int = DEFAULT_VIDEO_MAX_UPLOAD_BYTES,
+    # T13 (docs/designs/motor-de-metricas.md): `None` por default, mismo patrón que
+    # `scenario_video_store`/`video_token_issuer` — sin configurar, el panel de "Communication
+    # Coaching" simplemente no incluye coherencia/calidad de inglés (`judge_unavailable=True`),
+    # nunca un `AttributeError` sobre `None` ni un caller existente roto.
+    metrics_judge: MetricsJudgePort | None = None,
+    # T4: idem — sin configurar, el detalle por-segmento de confianza de Whisper simplemente no
+    # se persiste (el agregado en `evaluation_json` sigue funcionando igual, es independiente).
+    stt_metrics_store: SttMetricsPort | None = None,
 ) -> FastAPI:
     """Factory (no una `app` global a nivel de módulo) para que los tests puedan inyectar
     dobles de prueba de cada puerto sin compartir estado entre tests ni depender de
@@ -753,6 +765,11 @@ def create_app(
         started_at = clock()
         conversation: list[dict[str, str]] = []
         transcript: list[dict] = []
+        # T2/T4 (docs/designs/motor-de-metricas.md): segmentos de confianza de Whisper
+        # acumulados a lo largo de toda la llamada — antes se descartaban después de decidir el
+        # marcador inline `[unclear: ...]`. Se resetea junto con `transcript` en cada
+        # `call.start` (ver más abajo), igual que el resto del estado por-llamada.
+        stt_segments: list = []
         active_scenario: Scenario | None = None
         active_video: ScenarioVideo | None = None
         call_config = {"difficulty": "", "language": "", "training_type": ""}
@@ -871,6 +888,26 @@ def create_app(
         async def finish_call(outcome: str) -> None:
             nonlocal call_ended, active_scenario, active_video
 
+            # T15 — guarda de carrera de 2 conexiones (docs/designs/motor-de-metricas.md, hallazgo
+            # de la voz independiente de ingeniería): el frontend reconecta automáticamente tras
+            # una caída de red reusando el mismo `session_id`/token (no revocable, TTL 8h) — nada
+            # en `session_socket` impide 2 conexiones WS concurrentes para la misma sesión. Si la
+            # reconexión ya completó y guardó `outcome="ended"` con evaluación real, un
+            # `network_drop` tardío de la conexión vieja NO debe sobrescribirlo (`ON CONFLICT DO
+            # UPDATE` en `sqlite_store.py` es last-write-wins por defecto — esta lectura previa es
+            # la única guarda). Antes esta ventana de carrera era de milisegundos (scoring puro);
+            # el judge LLM (más abajo) la amplía a segundos, así que deja de ser solo teórica.
+            if outcome == "network_drop":
+                existing = session_store.get_session(session_id)
+                if existing is not None and existing.outcome == "ended" and existing.evaluation is not None:
+                    log_event(
+                        logger,
+                        "finish_call_skipped_stale_network_drop",
+                        correlation_id=session_id,
+                    )
+                    call_ended = True
+                    return
+
             ended_at = clock()
             critical_data_points = active_scenario.critical_data_points if active_scenario else []
             video_ground_truth = active_video.ground_truth_points if active_video else []
@@ -889,7 +926,67 @@ def create_app(
                 outcome,
                 video_ground_truth=video_ground_truth,
                 video_ended_at=reaction_video_ended_at,
+                turn_history=machine.history,
             )
+
+            # T4/T13/T14 (docs/designs/motor-de-metricas.md): `score_session` es puro (ADR-0006)
+            # y ya deja `communication_coaching` con `transcription_confidence`/`coherence`/
+            # `english_quality` en `None` — se completan aquí, en `finish_call`, que sí puede
+            # tocar adaptadores con red. Todo detrás de `if evaluation is not None`: cuando
+            # `outcome=="network_drop"`, `score_session` devuelve `None` y esto se salta por
+            # completo — ni el juez LLM ni el cómputo de confianza de transcripción corren en una
+            # desconexión trivial (gate explícito que la voz independiente marcó como CRÍTICO:
+            # sin él, se quema costo/latencia de Claude en cada "conectó y se cayó").
+            if evaluation is not None:
+                evaluation["communication_coaching"]["transcription_confidence"] = (
+                    rate_transcription_confidence(aggregate_transcription_confidence(stt_segments))
+                )
+                if stt_metrics_store is not None:
+                    # Riesgo aceptado y documentado (Fase 3 Sección 1/5 del plan): esta escritura
+                    # y `session_store.save_session()` más abajo no son atómicas entre sí — ver
+                    # `persistence/sqlite_stt_metrics_store.py`.
+                    stt_metrics_store.save_segments(session_id, stt_segments)
+
+                if metrics_judge is not None:
+                    try:
+                        judgment = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                metrics_judge.judge,
+                                transcript,
+                                critical_data_points,
+                                evaluation["collected"],
+                                evaluation["missing"],
+                            ),
+                            timeout=CLAUDE_TIMEOUT_SECONDS,
+                        )
+                        evaluation["communication_coaching"]["coherence"] = {
+                            "rating": judgment.coherence_rating,
+                            "tip": judgment.coherence_tip,
+                        }
+                        evaluation["communication_coaching"]["english_quality"] = {
+                            "rating": judgment.english_quality_rating,
+                            "tip": judgment.english_quality_tip,
+                        }
+                        evaluation["judge_unavailable"] = False
+                        log_event(
+                            logger,
+                            "metrics_judge_completed",
+                            correlation_id=session_id,
+                            completeness_agrees_with_keyword_match=judgment.completeness_agrees_with_keyword_match,
+                        )
+                    except (asyncio.TimeoutError, MetricsJudgeError) as error:
+                        # Degradación explícita (Fase 1 Sección 2 del plan) — nunca tumba
+                        # `finish_call`: la sesión se guarda igual con las 4 categorías
+                        # rule-based + latencia de turno + confianza de transcripción intactas.
+                        log_event(
+                            logger,
+                            "metrics_judge_unavailable",
+                            correlation_id=session_id,
+                            error=str(error),
+                        )
+                        evaluation["judge_unavailable"] = True
+                else:
+                    evaluation["judge_unavailable"] = True
 
             record = SessionRecord(
                 session_id=session_id,
@@ -899,7 +996,10 @@ def create_app(
                 started_at=started_at,
                 ended_at=ended_at,
                 turns=[
-                    {"event": t.event, "from": t.from_state.value, "to": t.to_state.value}
+                    # `at` agregado (T1, docs/designs/motor-de-metricas.md): antes se descartaba
+                    # al persistir aunque `machine.history` siempre lo tuvo — permite recalcular/
+                    # auditar la latencia de turno después sin re-instrumentar nada.
+                    {"event": t.event, "from": t.from_state.value, "to": t.to_state.value, "at": t.at}
                     for t in machine.history
                 ],
                 transcript=transcript,
@@ -961,6 +1061,7 @@ def create_app(
                     }
                     conversation = []
                     transcript = []
+                    stt_segments = []
                     started_at = clock()
                     machine = TurnStateMachine(clock=clock)
                     call_ended = False
@@ -1027,7 +1128,7 @@ def create_app(
                     stt_started = clock()
                     try:
                         audio_path = await asyncio.to_thread(microphone.stop_recording)
-                        text = await asyncio.to_thread(stt.transcribe, audio_path)
+                        transcription = await asyncio.to_thread(stt.transcribe, audio_path)
                     except Exception as error:  # noqa: BLE001 — falla real de hardware/mic (ej. "no audio grabado"): recuperable, no debe tumbar la sesión (contrato §7).
                         log_event(logger, "stt_failed", correlation_id=session_id, error=str(error))
                         await send({"event": "engine.activity", "message": None})
@@ -1035,15 +1136,21 @@ def create_app(
                         await send({"event": "call.status", "status": "connected"})
                         continue
 
+                    text = transcription.text
+                    # T2/T4 (docs/designs/motor-de-metricas.md): antes de este cambio,
+                    # `low_confidence_segment_count` se derivaba del marcador inline
+                    # `[unclear: ...]` porque `transcribe()` solo devolvía un `str` — ahora
+                    # `TranscriptionResult.segments` ya trae `is_low_confidence` calculado, y se
+                    # acumulan para la tip-card de confianza de transcripción al terminar la
+                    # llamada (nunca llamada "acento" — ver `core/transcription_confidence.py`).
+                    stt_segments.extend(transcription.segments)
+
                     log_event(
                         logger,
                         "stt_completed",
                         correlation_id=session_id,
                         latency_ms=(clock() - stt_started) * 1000,
-                        # NFR-09/NFR-08: confianza por segmento sin cambiar la firma de
-                        # `SpeechToTextPort.transcribe()` (ver docstring de `stt/whisper.py`) —
-                        # se deriva del marcador inline que ya produce el adaptador.
-                        low_confidence_segment_count=text.count("[unclear:"),
+                        low_confidence_segment_count=sum(1 for s in transcription.segments if s.is_low_confidence),
                     )
 
                     await send({"event": "engine.activity", "message": None})

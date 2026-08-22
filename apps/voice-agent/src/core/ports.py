@@ -44,9 +44,45 @@ class MicrophonePort(Protocol):
         ...
 
 
+# ---------------------------------------------------------------------------
+# STT estructurado — motor de métricas, docs/designs/motor-de-metricas.md (T2/T12). Antes
+# `transcribe()` devolvía un `str` a propósito (ver el docstring que tenía `stt/whisper.py`,
+# "evita cambios en cascada") — la migración a un resultado estructurado es deliberada y
+# ATÓMICA: todos los implementadores/stubs de `SpeechToTextPort` en este repo se actualizan en el
+# mismo cambio (`stt/whisper.py`, `test_stt.py`, `test_conversation.py`, `test_server_app.py`,
+# `test_server_video.py` vía import) — ver la revisión de `/autoplan`, Fase 3 Sección 2/5.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SttSegment:
+    """Un segmento de faster-whisper, con la señal de confianza que antes se descartaba
+    (Fase 1 0B de la revisión: "el dato ya existe en la librería, solo no se guardaba"). No
+    incluye una señal de acento — ver el naming: `avg_logprob`/`no_speech_prob`/
+    `compression_ratio` conflacionan ruido de fondo, calidad de mic, muletillas y acento sin
+    poder separarlos (0A punto 1) — se agregan en `core/transcription_confidence.py` como
+    "transcription confidence", nunca como "accent".
+    """
+
+    text: str
+    avg_logprob: float
+    no_speech_prob: float
+    compression_ratio: float
+    start_seconds: float
+    end_seconds: float
+    is_low_confidence: bool = False
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    text: str
+    segments: list[SttSegment] = field(default_factory=list)
+    language_probability: float | None = None
+
+
 @runtime_checkable
 class SpeechToTextPort(Protocol):
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str) -> TranscriptionResult:
         ...
 
 
@@ -63,6 +99,64 @@ class DispatcherPort(Protocol):
         conversation: list[dict[str, str]],
         scenario: str,
     ) -> str:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Juez de métricas (LLM) — motor de métricas, docs/designs/motor-de-metricas.md (T3/T13).
+# Adaptador con red (ver `llm/metrics_judge.py`), nunca importado dentro de `core/scoring.py`
+# (ADR-0006 — la voz independiente de ingeniería en la revisión de `/autoplan` encontró que la
+# ubicación original propuesta, `core/metrics_judge.py`, violaba esto). `finish_call`
+# (`server/app.py`) es quien compone el resultado de este puerto con el dict puro que devuelve
+# `score_session`, no `scoring.py` mismo.
+# ---------------------------------------------------------------------------
+
+
+class MetricsJudgeError(Exception):
+    """El juez LLM no pudo producir un juicio válido (timeout, rate-limit, JSON malformado,
+    faltan keys esperadas, fallo de auth). `finish_call` la captura y degrada a
+    `communication_coaching.coherence`/`english_quality` en `None` — nunca tumba la sesión
+    completa por esto (ver docs/designs/motor-de-metricas.md, Fase 1 Sección 2).
+    """
+
+
+@dataclass(frozen=True)
+class MetricsJudgment:
+    coherence_rating: str  # "good" | "improve" | "critical"
+    coherence_tip: str
+    english_quality_rating: str
+    english_quality_tip: str
+    # Diagnóstico interno, NUNCA una tip-card nueva (la Fase 2 de la revisión ya cerró el panel
+    # de coaching en 4 tarjetas: latencia, confianza de transcripción, coherencia, inglés) — sirve
+    # para detectar divergencias entre el keyword-matching de `_completeness` y una lectura
+    # semántica real, sin reabrir esa categoría ponderada. Ver TODOS.md #1/#5 de la revisión.
+    completeness_agrees_with_keyword_match: bool | None
+    raw_response: str
+
+
+@runtime_checkable
+class MetricsJudgePort(Protocol):
+    def judge(
+        self,
+        transcript: list[dict],
+        critical_data_points: list["CriticalDataPoint"],
+        collected: list[str],
+        missing: list[str],
+    ) -> MetricsJudgment:
+        ...
+
+
+@runtime_checkable
+class SttMetricsPort(Protocol):
+    """Persistencia del detalle por-segmento de confianza de Whisper (T4, docs/designs/
+    motor-de-metricas.md) — tabla nueva (`TODO-20`: nunca `ALTER TABLE` sobre `sessions`),
+    detalle de auditoría/depuración para `communication_coaching.transcription_confidence`
+    (el agregado en sí ya vive en `evaluation_json`, esto es la evidencia por-segmento detrás)."""
+
+    def save_segments(self, session_id: str, segments: list[SttSegment]) -> None:
+        ...
+
+    def get_segments(self, session_id: str) -> list[SttSegment]:
         ...
 
 

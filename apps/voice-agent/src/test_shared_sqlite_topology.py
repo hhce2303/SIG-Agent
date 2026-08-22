@@ -1,26 +1,29 @@
 """Regresión de topología compartida — descubierta durante la revisión de ingeniería de
 docs/designs/escenarios-de-video.md (hallazgo 3.2), independiente del feature de video en sí.
 
-`server_main.py::build_app` apunta los CINCO stores (scenario/session/settings/incident/video)
-al mismo archivo SQLite, cada uno con su propia conexión por operación y sin `busy_timeout`
-configurado en ningún `sqlite3.connect()`. Ningún test existente ejercitaba esa topología real
-— cada test de store usa su propio `tmp_path` privado. Este test abre los cinco contra UN
-archivo compartido y los golpea concurrentemente, para confirmar que no aparece
-`sqlite3.OperationalError: database is locked` — el escenario real más probable de disparar esto
-es autoría de ground truth de video ocurriendo mientras una sesión de llamada en vivo escribe.
+`server_main.py::build_app` apunta los SEIS stores (scenario/session/settings/incident/video/
+stt-metrics — el sexto agregado por T4, docs/designs/motor-de-metricas.md) al mismo archivo
+SQLite, cada uno con su propia conexión por operación y sin `busy_timeout` configurado en ningún
+`sqlite3.connect()`. Ningún test existente ejercitaba esa topología real — cada test de store
+usa su propio `tmp_path` privado. Este test abre los seis contra UN archivo compartido y los
+golpea concurrentemente, para confirmar que no aparece `sqlite3.OperationalError: database is
+locked` — el escenario real más probable de disparar esto es autoría de ground truth de video (o
+ahora, el judge de métricas escribiendo detalle de STT) ocurriendo mientras una sesión de llamada
+en vivo escribe.
 """
 
 import threading
 
-from core.ports import CriticalDataPoint, IncidentOutcome, Scenario, ScenarioVideo, SessionRecord
+from core.ports import CriticalDataPoint, IncidentOutcome, Scenario, ScenarioVideo, SessionRecord, SttSegment
 from persistence.sqlite_incident_store import SQLiteIncidentStore
 from persistence.sqlite_scenario_store import SQLiteScenarioStore
 from persistence.sqlite_scenario_video_store import SQLiteScenarioVideoStore
 from persistence.sqlite_settings_store import SQLiteSettingsStore
 from persistence.sqlite_store import SQLiteSessionStore
+from persistence.sqlite_stt_metrics_store import SQLiteSttMetricsStore
 
 
-def test_five_stores_on_one_shared_file_survive_concurrent_writes(tmp_path):
+def test_six_stores_on_one_shared_file_survive_concurrent_writes(tmp_path):
     shared_db_path = str(tmp_path / "sessions.db")
 
     scenario_store = SQLiteScenarioStore(shared_db_path)
@@ -28,6 +31,7 @@ def test_five_stores_on_one_shared_file_survive_concurrent_writes(tmp_path):
     settings_store = SQLiteSettingsStore(shared_db_path)
     incident_store = SQLiteIncidentStore(shared_db_path)
     video_store = SQLiteScenarioVideoStore(shared_db_path)
+    stt_metrics_store = SQLiteSttMetricsStore(shared_db_path)
 
     errors: list[Exception] = []
     errors_lock = threading.Lock()
@@ -72,9 +76,18 @@ def test_five_stores_on_one_shared_file_survive_concurrent_writes(tmp_path):
                 video_checksum=f"checksum-{i}", duration_seconds=30.0, content_type="video/mp4",
             ))
 
+    def write_stt_metrics():
+        for i in range(20):
+            stt_metrics_store.save_segments(f"sess-{i}", [
+                SttSegment(
+                    text="a segment", avg_logprob=-0.2, no_speech_prob=0.05,
+                    compression_ratio=1.0, start_seconds=0.0, end_seconds=1.0,
+                ),
+            ])
+
     threads = [
         threading.Thread(target=_run, args=(fn,))
-        for fn in (write_scenarios, write_sessions, write_settings, write_incidents, write_videos)
+        for fn in (write_scenarios, write_sessions, write_settings, write_incidents, write_videos, write_stt_metrics)
     ]
     for thread in threads:
         thread.start()

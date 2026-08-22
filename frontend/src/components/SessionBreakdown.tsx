@@ -1,6 +1,6 @@
-import { AlertCircle, CheckCircle2 } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Languages, MessageSquareText, Mic, Timer } from 'lucide-react'
 import ScoreRing from './ScoreRing'
-import type { TrainingSession } from '../types'
+import type { CoachingRating, CommunicationCoaching, TrainingSession } from '../types'
 
 // Extraído de `ReviewPage` (roadmap Fase 2: "puntaje compuesto, desglose, y narrativa de
 // debrief" + historial con posible "replay"). Es el mismo componente en las dos pantallas a
@@ -28,6 +28,10 @@ export default function SessionBreakdown({ session }: { session: TrainingSession
         <h2>{evaluation.overall_score} / 100</h2>
         <p>{evaluation.summary}</p>
       </section>
+      {/* Motor de métricas (docs/designs/motor-de-metricas.md, Fase 2 Pass 1 de la revisión):
+          `.category-scores` es la fórmula ponderada ya confirmada con el usuario (TODO-10
+          RESOLVED) — NUNCA se le agregan barras nuevas acá. Las 4 dimensiones nuevas viven en
+          "Communication Coaching" más abajo, como tarjetas cualitativas, no como más barras. */}
       <section className="panel category-scores">
         <h3>Category Scores</h3>
         {Object.entries(evaluation.category_scores).map(([label, score]) => (
@@ -47,6 +51,9 @@ export default function SessionBreakdown({ session }: { session: TrainingSession
         {evaluation.strengths.map((item) => <p className="check-line ok" key={item}><CheckCircle2 size={17} />{item}</p>)}
         {evaluation.improvements.map((item) => <p className="check-line warn" key={item}><AlertCircle size={17} />{item}</p>)}
       </section>
+      {evaluation.communication_coaching && (
+        <CommunicationCoachingPanel coaching={evaluation.communication_coaching} judgeUnavailable={evaluation.judge_unavailable ?? false} />
+      )}
       <section className="panel transcript-card full-transcript">
         <h3>Transcript & Timeline</h3>
         <div className="timeline">
@@ -54,13 +61,119 @@ export default function SessionBreakdown({ session }: { session: TrainingSession
             <div className="transcript-entry" key={`${entry.seconds}-${index}`}>
               <time>{formatTime(entry.seconds)}</time>
               <strong className={entry.role === 'dispatcher' ? 'dispatcher-text' : 'operator-text'}>{entry.role === 'dispatcher' ? 'Dispatcher' : 'Operator'}</strong>
-              <span>{entry.text}</span>
+              <span>{renderTranscriptText(entry.text)}</span>
             </div>
           ))}
         </div>
       </section>
     </div>
   )
+}
+
+// "Communication Coaching" — panel nuevo, separado a propósito de `.category-scores` (ver
+// comentario arriba). Reusa `.rating.good/.improve/.critical` (globals.css) — clases que ya
+// existían de un mockup anterior sin ningún .tsx que las usara hasta este cambio (Fase 2, Pass 5
+// de la revisión). Degradación POR CAMPO: cada tarjeta se omite individualmente si su valor es
+// `null`, nunca se oculta el panel completo por un solo campo faltante/fallido.
+function CommunicationCoachingPanel({ coaching, judgeUnavailable }: { coaching: CommunicationCoaching; judgeUnavailable: boolean }) {
+  const cards = [
+    coaching.response_latency && {
+      key: 'response_latency',
+      icon: <Timer size={18} />,
+      title: 'Response Latency',
+      rating: coaching.response_latency.rating,
+      tip: coaching.response_latency.tip,
+    },
+    coaching.transcription_confidence && {
+      key: 'transcription_confidence',
+      icon: <Mic size={18} />,
+      title: 'Transcription Confidence',
+      rating: coaching.transcription_confidence.rating,
+      tip: coaching.transcription_confidence.tip,
+    },
+    coaching.coherence && {
+      key: 'coherence',
+      icon: <MessageSquareText size={18} />,
+      title: 'Coherence',
+      rating: coaching.coherence.rating,
+      tip: coaching.coherence.tip,
+    },
+    coaching.english_quality && {
+      key: 'english_quality',
+      icon: <Languages size={18} />,
+      title: 'English Quality',
+      rating: coaching.english_quality.rating,
+      tip: coaching.english_quality.tip,
+    },
+  ].filter(Boolean) as { key: string; icon: React.ReactNode; title: string; rating: CoachingRating; tip: string }[]
+
+  if (!cards.length) {
+    // Ningún campo tuvo datos (ej. llamada casi vacía) — nunca se muestra un panel vacío en
+    // silencio, un mensaje explícito en su lugar (mismo principio que el resto del panel).
+    return (
+      <section className="panel review-details coaching-panel">
+        <h3>Communication Coaching</h3>
+        <p className="empty-copy">Not enough signal from this call to generate coaching notes.</p>
+      </section>
+    )
+  }
+
+  const missingJudgeCards = judgeUnavailable && !coaching.coherence && !coaching.english_quality
+
+  return (
+    <section className="panel review-details coaching-panel">
+      <h3>Communication Coaching</h3>
+      <div className="coaching-grid">
+        {cards.map((card) => (
+          <div className="coaching-tip" key={card.key}>
+            <div className="coaching-tip-head">
+              {card.icon}
+              <span>{card.title}</span>
+              <i className={`rating ${card.rating}`}>{formatRating(card.rating)}</i>
+            </div>
+            <p>{card.tip}</p>
+          </div>
+        ))}
+      </div>
+      {missingJudgeCards && (
+        <p className="empty-copy coaching-judge-note">
+          Coherence and English quality weren't available for this session — showing rule-based scores only.
+        </p>
+      )}
+    </section>
+  )
+}
+
+function formatRating(rating: CoachingRating): string {
+  return rating === 'good' ? 'Good' : rating === 'improve' ? 'Improve' : 'Needs work'
+}
+
+// `[unclear: ...]` (ver `stt/whisper.py`, NFR-09) ya viaja inline en el texto — este render lo
+// resalta visualmente en vez de mostrar los corchetes crudos (T10, docs/designs/motor-de-
+// metricas.md), extendiendo el vocabulario que ya existe en vez de inventar un campo nuevo.
+const UNCLEAR_PATTERN = /\[unclear: (.+?)\]/g
+
+function renderTranscriptText(text: string): React.ReactNode {
+  if (!text.includes('[unclear:')) return text
+
+  const parts: React.ReactNode[] = []
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  UNCLEAR_PATTERN.lastIndex = 0
+  while ((match = UNCLEAR_PATTERN.exec(text))) {
+    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index))
+    parts.push(
+      <span className="unclear-span" key={match.index} title="Low STT confidence — the dispatcher was prompted to confirm this">
+        <Mic size={11} />
+        {match[1]}
+      </span>,
+    )
+    lastIndex = match.index + match[0].length
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex))
+
+  return parts
 }
 
 // `category_scores` keys ahora son las 4 categorías reales del motor de métricas

@@ -345,6 +345,30 @@ button:disabled { opacity:.45; cursor:not-allowed; transform:none!important; }
 .full-transcript { grid-column:1/-1; min-height:auto; padding:22px; }
 .transcript-entry { display:grid; grid-template-columns:58px 90px 1fr; gap:12px; padding:10px 0; border-bottom:1px solid rgba(24,54,80,.45); font-size:12px; }
 .transcript-entry time { color:var(--muted); }
+
+/* "Communication Coaching" — motor de métricas, docs/designs/motor-de-metricas.md (T7/T8/T11).
+   Panel nuevo, aparte de `.category-scores` a propósito (ver comentario en SessionBreakdown.tsx)
+   — spans las 2 columnas del grid padre para no dejar una celda vacía a medias. */
+.coaching-panel { grid-column:1/-1; padding:24px; }
+.coaching-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-top:14px; }
+.coaching-tip { border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); padding:16px 18px; }
+.coaching-tip-head { display:flex; align-items:center; gap:9px; margin-bottom:9px; color:#cbd8e5; }
+.coaching-tip-head svg { color:#5ea8ff; flex:none; }
+.coaching-tip-head span { font-size:13px; font-weight:500; flex:1; }
+.coaching-tip-head .rating { font-size:9px; padding:4px 8px; text-transform:uppercase; letter-spacing:.4px; }
+.coaching-tip p { color:#a8b9ca; font-size:12px; line-height:1.55; margin:0; }
+.coaching-judge-note { margin-top:14px; }
+/* Debajo de ~1400px de viewport (Pass 6 de la revisión): apilar 1 columna en vez de 2 — el
+   piso mínimo de la app (1180px, ver `body{min-width}` más abajo) no debe romper el layout. */
+@media (max-width: 1400px) {
+  .coaching-grid { grid-template-columns:1fr; }
+}
+
+/* `[unclear: ...]` resaltado inline (T10) — extiende el marcador de texto que ya existe
+   (`stt/whisper.py`, NFR-09) en vez de un componente/color nuevo sin relación. Mismo tono que
+   `.rating.improve` (ámbar): ni error (rojo) ni éxito (verde), una señal de "verificar esto". */
+.unclear-span { display:inline-flex; align-items:center; gap:4px; padding:1px 6px; border-radius:4px; background:rgba(240,180,60,.12); color:#ffc45a; border:1px solid rgba(240,180,60,.28); }
+.unclear-span svg { flex:none; }
 .functional-analytics { display:grid; grid-template-columns:1.2fr 1fr; gap:14px; margin-top:14px; }
 .functional-analytics .trend-panel { min-height:360px; }
 .kpi-grid.three { grid-template-columns:repeat(3,1fr); }

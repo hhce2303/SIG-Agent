@@ -86,6 +86,43 @@ export type CallStatus =
   | 'completed'
   | 'error'
 
+// Motor de métricas — docs/designs/motor-de-metricas.md. `rating` es la misma taxonomía en las
+// 4 tarjetas del panel de "Communication Coaching" (Fase 2, Pass 1 de la revisión): mapea 1:1 a
+// las clases CSS `.rating.good/.improve/.critical` (ya existían en globals.css, sin usar en
+// ningún .tsx hasta este cambio).
+export type CoachingRating = 'good' | 'improve' | 'critical'
+
+export type ResponseLatencyCoaching = {
+  rating: CoachingRating
+  average_ms: number
+  sample_count: number
+  fastest_ms: number
+  slowest_ms: number
+  tip: string
+}
+
+export type TranscriptionConfidenceCoaching = {
+  rating: CoachingRating
+  segment_count: number
+  low_confidence_segment_count: number
+  tip: string
+}
+
+export type SimpleCoaching = {
+  rating: CoachingRating
+  tip: string
+}
+
+// Deliberadamente NO se llama "accent"/"pronunciation" en ningún campo — ver Fase 1 0A punto 1
+// de la revisión: Whisper no tiene clasificador de acento, `transcription_confidence` es la
+// señal real (confianza de transcripción), nombrada por lo que mide.
+export type CommunicationCoaching = {
+  response_latency: ResponseLatencyCoaching | null
+  transcription_confidence: TranscriptionConfidenceCoaching | null
+  coherence: SimpleCoaching | null
+  english_quality: SimpleCoaching | null
+}
+
 export type Evaluation = {
   overall_score: number
   category_scores: Record<string, number>
@@ -99,6 +136,14 @@ export type Evaluation = {
   // de `call.start`. Ninguno de los dos casos es "0 segundos" — tratar como "no aplica", nunca
   // mostrar un cronómetro en 0 (ver hallazgo de diseño sobre no puntuar esto como reflejos).
   video_reaction_seconds?: number | null
+  // Motor de métricas (T1-T4/T13) — mismo patrón de opcionalidad: `undefined` en sesiones
+  // históricas anteriores a este cambio (el panel de coaching completo no se muestra, nunca con
+  // campos en 0/vacío). Presente en sesiones nuevas, con cada sub-campo en `null` si no hubo
+  // muestra o el juez LLM no corrió — degradación POR CAMPO, nunca por panel completo.
+  communication_coaching?: CommunicationCoaching
+  // `true` si el juez LLM (coherencia/inglés) no corrió o falló esta sesión — informativo, para
+  // distinguir "no configurado/falló" de "no aplica" en la copy del panel.
+  judge_unavailable?: boolean
 }
 
 export type TrainingSession = {

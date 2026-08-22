@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from auth.session_token import HmacSessionTokenIssuer
-from core.ports import DispatcherError
+from core.ports import DispatcherError, TranscriptionResult
 from persistence.sqlite_incident_store import SQLiteIncidentStore
 from persistence.sqlite_scenario_store import SQLiteScenarioStore
 from persistence.sqlite_settings_store import SQLiteSettingsStore
@@ -42,14 +42,18 @@ class StubDispatcher:
 
 
 class StubSTT:
+    """T2/T12 (docs/designs/motor-de-metricas.md): devuelve `TranscriptionResult`, no un `str` —
+    este stub también lo importa `test_server_video.py`, así que arreglarlo acá cubre los dos
+    archivos (hallazgo de la voz independiente de ingeniería)."""
+
     def __init__(self, texts):
         self._texts = list(texts)
         self.calls = 0
 
-    def transcribe(self, audio_path):
+    def transcribe(self, audio_path) -> TranscriptionResult:
         text = self._texts[self.calls]
         self.calls += 1
-        return text
+        return TranscriptionResult(text=text, segments=[])
 
 
 class StubTTS:
@@ -58,6 +62,29 @@ class StubTTS:
 
     def speak(self, text, voice=None):
         self.spoken.append((text, voice))
+
+
+class StubMetricsJudge:
+    """T13/T14 (docs/designs/motor-de-metricas.md) — stub de `MetricsJudgePort`. `error` inyecta
+    una `MetricsJudgeError` para probar la degradación explícita de `finish_call`."""
+
+    def __init__(self, error: Exception | None = None):
+        self._error = error
+        self.calls = 0
+
+    def judge(self, transcript, critical_data_points, collected, missing):
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        from core.ports import MetricsJudgment
+        return MetricsJudgment(
+            coherence_rating="good",
+            coherence_tip="Clear and well organized report.",
+            english_quality_rating="good",
+            english_quality_tip="Fluent, no notable errors.",
+            completeness_agrees_with_keyword_match=True,
+            raw_response="{}",
+        )
 
 
 class StubMicrophone:
@@ -90,7 +117,7 @@ def app_components(tmp_path):
     return token_issuer, session_store, scenario_store, settings_store, incident_store
 
 
-def make_client(app_components, dispatcher=None, stt=None, tts=None, microphone=None):
+def make_client(app_components, dispatcher=None, stt=None, tts=None, microphone=None, metrics_judge=None):
     token_issuer, session_store, scenario_store, settings_store, incident_store = app_components
     app = create_app(
         token_issuer=token_issuer,
@@ -99,6 +126,7 @@ def make_client(app_components, dispatcher=None, stt=None, tts=None, microphone=
         settings_store=settings_store,
         incident_store=incident_store,
         supervisor_passphrase=PASSPHRASE,
+        metrics_judge=metrics_judge,
         dispatcher=dispatcher or StubDispatcher(["911, what is your emergency?"]),
         stt=stt or StubSTT([""]),
         tts=tts or StubTTS(),
@@ -305,6 +333,123 @@ def test_full_call_flow_produces_a_completed_session_with_evaluation(app_compone
     record = app_components[1].get_session(body["session_id"])
     assert record.outcome == "ended"
     assert record.evaluation is not None
+    # T4/T14 (docs/designs/motor-de-metricas.md): sin `metrics_judge` configurado, la sesión
+    # sigue completándose — el panel de coaching se degrada explícitamente, no rompe la llamada.
+    coaching = record.evaluation["communication_coaching"]
+    assert coaching["coherence"] is None
+    assert coaching["english_quality"] is None
+    assert record.evaluation["judge_unavailable"] is True
+    # `StubSTT` no fabrica `SttSegment`s (solo texto) — sin datos de segmento no hay nada que
+    # agregar, `transcription_confidence` queda en `None` (nunca inventa un score sin datos).
+    assert coaching["transcription_confidence"] is None
+
+
+def test_full_call_flow_with_metrics_judge_fills_coherence_and_english_quality(app_components):
+    judge = StubMetricsJudge()
+    dispatcher = StubDispatcher(["911, what is your emergency?", "Can you spell out the license plate?"])
+    stt = StubSTT(["My car was stolen, license plate ABC123, near the mall this morning."])
+    client = make_client(app_components, dispatcher=dispatcher, stt=stt, metrics_judge=judge)
+    body = _login(client).json()
+
+    with client.websocket_connect(f"/ws/session/{body['session_id']}?token={body['token']}") as ws:
+        ws.receive_json(), ws.receive_json(), ws.receive_json()
+        ws.send_json({"command": "call.start", "scenarioId": "vehicle_theft", "difficulty": "Medium", "language": "English", "trainingType": "Police"})
+        _drain_until(ws, "transcript.dispatcher")
+
+        ws.send_json({"command": "recording.start"})
+        _drain_until(ws, "operator.speaking")
+        ws.send_json({"command": "recording.stop"})
+        _drain_until(ws, "transcript.dispatcher")
+
+        ws.send_json({"command": "call.end"})
+        completed = _drain_until(ws, "session.completed")
+
+    coaching = completed["session"]["evaluation"]["communication_coaching"]
+    assert coaching["coherence"] == {"rating": "good", "tip": "Clear and well organized report."}
+    assert coaching["english_quality"]["rating"] == "good"
+    assert completed["session"]["evaluation"]["judge_unavailable"] is False
+    assert judge.calls == 1
+
+
+def test_full_call_flow_degrades_gracefully_when_judge_fails(app_components):
+    from core.ports import MetricsJudgeError
+
+    judge = StubMetricsJudge(error=MetricsJudgeError("simulated Claude outage"))
+    client = make_client(app_components, metrics_judge=judge)
+    body = _login(client).json()
+
+    with client.websocket_connect(f"/ws/session/{body['session_id']}?token={body['token']}") as ws:
+        ws.receive_json(), ws.receive_json(), ws.receive_json()
+        ws.send_json({"command": "call.start", "scenarioId": "vehicle_theft", "difficulty": "Medium", "language": "English", "trainingType": "Police"})
+        _drain_until(ws, "transcript.dispatcher")
+
+        ws.send_json({"command": "call.end"})
+        completed = _drain_until(ws, "session.completed")
+
+    # La sesión se completa igual — nunca se tumba `finish_call` por un fallo del judge.
+    evaluation = completed["session"]["evaluation"]
+    assert evaluation is not None
+    assert evaluation["judge_unavailable"] is True
+    assert evaluation["communication_coaching"]["coherence"] is None
+    assert evaluation["category_scores"]["completeness"] is not None  # las 4 categorías siguen intactas
+
+
+def test_judge_is_never_called_when_the_call_network_drops(app_components):
+    """T14 (CRÍTICO, hallazgo de la voz independiente): el judge no debe correr en una
+    desconexión trivial — `score_session` devuelve `None` para `network_drop` y todo el bloque
+    que llama al judge está detrás de `if evaluation is not None`."""
+
+    judge = StubMetricsJudge()
+    client = make_client(app_components, metrics_judge=judge)
+    body = _login(client).json()
+
+    with client.websocket_connect(f"/ws/session/{body['session_id']}?token={body['token']}") as ws:
+        ws.receive_json(), ws.receive_json(), ws.receive_json()
+        ws.send_json({"command": "call.start", "scenarioId": "vehicle_theft", "difficulty": "Medium", "language": "English", "trainingType": "Police"})
+        _drain_until(ws, "transcript.dispatcher")
+        # Desconexión sin `call.end` — network_drop.
+
+    assert judge.calls == 0
+    record = app_components[1].get_session(body["session_id"])
+    assert record.outcome == "network_drop"
+    assert record.evaluation is None
+
+
+def test_stale_network_drop_never_overwrites_an_already_completed_session(app_components):
+    """T15 — guarda de carrera de 2 conexiones (docs/designs/motor-de-metricas.md). Simula el
+    escenario que encontró la voz independiente de ingeniería: una conexión reconectada ya
+    completó `call.end` (outcome="ended" con evaluación real); una segunda conexión para la
+    MISMA sesión que solo llega a desconectarse (network_drop tardío) no debe sobrescribirla."""
+
+    # 2 conexiones → 2 saludos del dispatcher (uno por `call.start`).
+    dispatcher = StubDispatcher(["911, what is your emergency?", "911, what is your emergency?"])
+    client = make_client(app_components, dispatcher=dispatcher)
+    body = _login(client).json()
+    ws_url = f"/ws/session/{body['session_id']}?token={body['token']}"
+
+    with client.websocket_connect(ws_url) as ws:
+        ws.receive_json(), ws.receive_json(), ws.receive_json()
+        ws.send_json({"command": "call.start", "scenarioId": "vehicle_theft", "difficulty": "Medium", "language": "English", "trainingType": "Police"})
+        _drain_until(ws, "transcript.dispatcher")
+        ws.send_json({"command": "call.end"})
+        _drain_until(ws, "session.completed")
+
+    record_after_ended = app_components[1].get_session(body["session_id"])
+    assert record_after_ended.outcome == "ended"
+    assert record_after_ended.evaluation is not None
+
+    # "Conexión vieja" tardía para la misma sesión — solo se desconecta, sin `call.start` ni
+    # `call.end` (simula la reconexión del frontend habiendo llegado primero con el resultado
+    # bueno, y la conexión original terminando después con un network_drop obsoleto).
+    with client.websocket_connect(ws_url) as ws:
+        ws.receive_json(), ws.receive_json(), ws.receive_json()
+        ws.send_json({"command": "call.start", "scenarioId": "vehicle_theft", "difficulty": "Medium", "language": "English", "trainingType": "Police"})
+        _drain_until(ws, "transcript.dispatcher")
+        # Se desconecta sin `call.end` — dispara `finish_call("network_drop")` en el `finally`.
+
+    record_after_stale_drop = app_components[1].get_session(body["session_id"])
+    assert record_after_stale_drop.outcome == "ended"  # NO se sobrescribió con "network_drop"
+    assert record_after_stale_drop.evaluation is not None
 
 
 def test_call_start_with_unknown_scenario_is_a_recoverable_error(client):
