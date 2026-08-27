@@ -26,3 +26,5 @@ apps/voice-agent/src/dist/
 apps/voice-agent/src/build/
 apps/voice-agent/src/*.spec.bak
 apps/voice-agent/src/logs/
+
+_internal/
