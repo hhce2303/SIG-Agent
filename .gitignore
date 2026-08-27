@@ -16,3 +16,13 @@ __pycache__/
 
 # Scripts temporales generados por dev-up.ps1 en cada corrida — no son parte del repo.
 .dev-up-tmp/
+
+# docs/designs/empaquetado-ejecutable-backend.md, Premisa 4/Distribution Plan: pesos de modelo
+# descargados por scripts/fetch_models.py (varios GB, muy por encima del límite de 100MB/archivo
+# de GitHub) y las carpetas de salida de PyInstaller — regenerados localmente antes de cada
+# build, nunca versionados.
+models/
+apps/voice-agent/src/dist/
+apps/voice-agent/src/build/
+apps/voice-agent/src/*.spec.bak
+apps/voice-agent/src/logs/

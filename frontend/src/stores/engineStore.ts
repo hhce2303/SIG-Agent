@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { DEFAULT_BACKEND_WS_URL } from '../config'
-import { buildWsUrl, getScenarioVideoAccess, httpBaseFrom, login as apiLogin } from '../lib/api'
+import { buildWsUrl, getScenarioLocationBrief, getScenarioVideoAccess, httpBaseFrom, login as apiLogin } from '../lib/api'
 import { voiceBridge, type ConnectionStatus } from '../lib/voiceBridge'
 import type {
   CallStatus,
   EngineEvent,
+  ScenarioLocationAccess,
   ScenarioSummary,
   ScenarioVideoAccess,
   TrainingSession,
@@ -13,9 +14,9 @@ import type {
 } from '../types'
 
 const fallbackScenarios: ScenarioSummary[] = [
-  { id: 'vehicle_theft', title: 'Vehicle Theft', category: 'Police', description: 'Report a recently stolen vehicle.', difficulty: 'Medium', has_video: false },
-  { id: 'domestic_dispute', title: 'Domestic Dispute', category: 'Police', description: 'Handle an active domestic disturbance.', difficulty: 'Hard', has_video: false },
-  { id: 'traffic_accident', title: 'Traffic Accident', category: 'Police / EMS', description: 'Report a collision with a possible injury.', difficulty: 'Medium', has_video: false },
+  { id: 'vehicle_theft', title: 'Vehicle Theft', category: 'Police', description: 'Report a recently stolen vehicle.', difficulty: 'Medium', has_video: false, has_location: false },
+  { id: 'domestic_dispute', title: 'Domestic Dispute', category: 'Police', description: 'Handle an active domestic disturbance.', difficulty: 'Hard', has_video: false, has_location: false },
+  { id: 'traffic_accident', title: 'Traffic Accident', category: 'Police / EMS', description: 'Report a collision with a possible injury.', difficulty: 'Medium', has_video: false, has_location: false },
 ]
 
 type PersistedConfig = 'selectedScenarioId' | 'difficulty' | 'language' | 'trainingType'
@@ -57,6 +58,14 @@ type EngineState = {
   // texto de siempre), objeto = sí hay video que mostrar antes de la llamada.
   videoAccess?: ScenarioVideoAccess | null
   videoAccessLoading: boolean
+  // Ubicación del incidente (docs/designs/ubicacion-del-incidente.md) — mismo shape de tri-state
+  // que videoAccess: `undefined` = sin chequear todavía, `null` = chequeado, sin ubicación
+  // configurada, objeto = sí hay ubicación que mostrar antes de la llamada. A diferencia de
+  // video, NO hay un `notifyLocationSeen` — la ubicación se puntúa incondicionalmente si está
+  // configurada (nunca una exención por "el trainee la vio o no", ver Fase 3 Sección 1 del
+  // design doc, hallazgo B1/B2).
+  locationBrief?: ScenarioLocationAccess | null
+  locationBriefLoading: boolean
   initialize: () => void
   login: (supervisorId: string, passphrase: string) => Promise<void>
   logout: () => void
@@ -65,6 +74,8 @@ type EngineState = {
   loadVideoAccess: (scenarioId: string) => Promise<ScenarioVideoAccess | null>
   notifyVideoEnded: (scenarioId: string) => void
   clearVideoAccess: () => void
+  loadLocationBrief: (scenarioId: string) => Promise<ScenarioLocationAccess | null>
+  clearLocationBrief: () => void
   startCall: () => void
   toggleRecording: () => void
   pause: () => void
@@ -96,6 +107,8 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
   recording: false,
   videoAccess: undefined,
   videoAccessLoading: false,
+  locationBrief: undefined,
+  locationBriefLoading: false,
 
   initialize: () => {
     // Solo cablea los listeners del bridge — ya no conecta acá. La conexión real requiere un
@@ -113,7 +126,19 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
     voiceBridge.subscribe((event: EngineEvent) => {
       switch (event.event) {
         case 'system.ready': set({ engineVersion: event.version, error: undefined }); break
-        case 'scenarios.data': set({ scenarios: event.scenarios.length ? event.scenarios : fallbackScenarios }); break
+        case 'scenarios.data': {
+          const scenarios = event.scenarios.length ? event.scenarios : fallbackScenarios
+          // `selectedScenarioId` se persiste en localStorage entre reinicios (ver `partialize`
+          // abajo) — si el escenario que quedó seleccionado la última vez ya no existe (se
+          // borró, o la base cambió), `call.start` mandaría un scenarioId que el backend no
+          // reconoce ("Unknown scenario.") y la llamada se queda colgada en "Connecting…" sin
+          // ningún gate ni error claro. Se corrige acá, en el único lugar donde la lista real de
+          // escenarios llega, cayendo al primero disponible.
+          const current = get().selectedScenarioId
+          const stillValid = scenarios.some((scenario) => scenario.id === current)
+          set({ scenarios, ...(stillValid ? {} : { selectedScenarioId: scenarios[0]?.id ?? '' }) })
+          break
+        }
         case 'history.data': set({ history: event.sessions }); break
         case 'call.started': set({ activeSessionId: event.sessionId, activeScenario: event.scenario }); break
         case 'call.status': set({ callStatus: event.status }); break
@@ -169,6 +194,15 @@ export const useEngineStore = create<EngineState>()(persist((set, get) => ({
   // seguiría "verdadero" para siempre y CallPage renderizaría el gate de video otra vez encima
   // de una llamada ya en curso.
   clearVideoAccess: () => set({ videoAccess: undefined }),
+  loadLocationBrief: async (scenarioId) => {
+    const state = get()
+    if (!state.authToken) return null
+    set({ locationBriefLoading: true, locationBrief: undefined })
+    const brief = await getScenarioLocationBrief(httpBaseFrom(state.bridgeUrl), state.authToken, scenarioId)
+    set({ locationBrief: brief, locationBriefLoading: false })
+    return brief
+  },
+  clearLocationBrief: () => set({ locationBrief: undefined }),
   startCall: () => {
     const state = get()
     set({ transcript: [], lastSession: undefined, error: undefined, warning: undefined, callStatus: 'connecting' })

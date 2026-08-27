@@ -10,6 +10,8 @@ Dominio puro (sin FastAPI) — cualquier capa puede usar `log_event`, no solo el
 
 import json
 import logging
+import logging.handlers
+import os
 import sys
 
 
@@ -29,16 +31,49 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload)
 
 
-def configure_logging(level: int = logging.INFO) -> None:
-    """Reemplaza los handlers del root logger por uno que emite JSON a stdout. Llamar una vez
-    al arrancar el proceso (ver `server_main.py`) — los tests configuran sus propios loggers/
-    `caplog`, no llaman a esto."""
+def configure_logging(level: int = logging.INFO, log_dir: str | None = None) -> None:
+    """Reemplaza los handlers del root logger. Llamar una vez al arrancar el proceso (ver
+    `server_main.py`) — los tests configuran sus propios loggers/`caplog`, no llaman a esto.
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter())
+    `log_dir` (docs/designs/empaquetado-ejecutable-backend.md, Premisa 8 — diagnóstico de campo):
+    si se pasa, agrega un `RotatingFileHandler` que escribe a `<log_dir>/server.log`. En un
+    `.exe` de doble-click sin consola visible (`console=False` en el `.spec`), el stdout de hoy
+    se pierde por completo — este handler es lo que permite mandar `logs/` para diagnosticar en
+    vez de nada. Guardrail: nunca loguear el valor de un secreto
+    (`ANTHROPIC_API_KEY`/`SESSION_TOKEN_SECRET`/`SUPERVISOR_PASSPHRASE`/`MANAGER_PASSPHRASE`) —
+    hoy nada lo hace, pero no hay ningún chequeo automático que lo impida si alguien agrega un
+    log line de debug más adelante; quien toque este módulo debe mantener esa disciplina a mano.
+    """
+
+    handlers: list[logging.Handler] = []
+
+    # Guard `sys.stdout is not None`: bajo un build de PyInstaller con `console=False`,
+    # `sys.stdout` puede ser `None` — pasarlo explícito a `StreamHandler(None)` no cae a stderr
+    # como cuando se omite el argumento, así que esas líneas se perderían en silencio por cada
+    # log line en vez de simplemente no agregar el handler.
+    if sys.stdout is not None:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(JsonFormatter())
+        handlers.append(stream_handler)
+
+    if log_dir:
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            file_handler = logging.handlers.RotatingFileHandler(
+                os.path.join(log_dir, "server.log"),
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(JsonFormatter())
+            handlers.append(file_handler)
+        except OSError:
+            # Disco lleno, permisos bloqueados en una máquina de concesionario endurecida —
+            # una app corriendo sin log de archivo es mejor que ninguna app (Premisa 8).
+            pass
 
     root = logging.getLogger()
-    root.handlers = [handler]
+    root.handlers = handlers
     root.setLevel(level)
 
 

@@ -4,8 +4,8 @@ Dominio puro — sin FastAPI, sin SQLite, sin reloj real (todos los timestamps s
 inyectados, igual que en `test_turn_state.py`).
 """
 
-from core.ports import CriticalDataPoint, VideoGroundTruthPoint
-from core.scoring import ScoreWeights, score_session
+from core.ports import CriticalDataPoint, ScenarioLocation, VideoGroundTruthPoint
+from core.scoring import ScoreWeights, is_location_configured, score_session
 from core.turn_state import TurnState, TurnTransition
 
 VEHICLE_THEFT_POINTS = [
@@ -332,3 +332,96 @@ def test_communication_coaching_judge_fields_stay_none_until_finish_call_fills_t
     assert coaching["transcription_confidence"] is None
     assert coaching["coherence"] is None
     assert coaching["english_quality"] is None
+
+
+# ---------------------------------------------------------------------------
+# Ubicación del incidente — docs/designs/ubicacion-del-incidente.md (autoplan 2026-08-21/22).
+# ---------------------------------------------------------------------------
+
+
+def test_is_location_configured_false_for_none():
+    assert is_location_configured(None) is False
+
+
+def test_is_location_configured_false_when_all_text_fields_are_empty():
+    location = ScenarioLocation(scenario_id="s1", marker_x=0.5, marker_y=0.5)
+
+    assert is_location_configured(location) is False
+
+
+def test_is_location_configured_true_with_just_one_field():
+    location = ScenarioLocation(scenario_id="s1", street="5th Avenue")
+
+    assert is_location_configured(location) is True
+
+
+def test_no_location_configured_produces_identical_evaluation_to_before_this_feature():
+    # Regresión mandatoria (Fase 3 Sección 3 del design doc) — cualquier sesión sin ubicación
+    # configurada debe puntuar exactamente igual que antes de este feature.
+    kwargs = dict(started_at=1000.0, ended_at=1090.0, outcome="ended")
+    transcript = [_operator("A white Toyota Camry, license plate ABC123, near the shopping center.", at=1010.0)]
+
+    with_none = score_session(transcript, VEHICLE_THEFT_POINTS, location=None, **kwargs)
+    without_param = score_session(transcript, VEHICLE_THEFT_POINTS, **kwargs)
+
+    assert with_none == without_param
+
+
+def test_location_facts_mentioned_are_collected_not_missing_todo17_regression():
+    # TODO-17 (docs/architecture/TODOS.md): un reporte real y correcto en lenguaje natural puntuó
+    # 17/100 porque el matching era contra el label, no contra contenido real. Esta es la misma
+    # clase de regresión para ubicación: un trainee que SÍ recibió la calle configurada (vía la
+    # nueva pantalla de pre-llamada) y la repite debe puntuar collected, no missing.
+    location = ScenarioLocation(scenario_id="s1", street="5th Avenue", cross_street="Main Street")
+    transcript = [_operator("The incident happened on 5th Avenue, near Main Street.", at=1010.0)]
+
+    result = score_session(transcript, [], started_at=1000.0, ended_at=1090.0, outcome="ended", location=location)
+
+    assert any(item.startswith("Street:") for item in result["collected"])
+    assert any(item.startswith("Cross street:") for item in result["collected"])
+    assert result["missing"] == []
+
+
+def test_location_word_fallback_disabled_generic_word_does_not_falsely_match():
+    # Hallazgo crítico A3 (voz independiente de ingeniería, Fase 3): usar el valor real como label
+    # ("Street: 5th Avenue") activaría el fallback de palabra suelta de `_matches_point` en
+    # cualquier transcript que contenga "avenue" — `word_fallback=False` lo desactiva.
+    location = ScenarioLocation(scenario_id="s1", street="5th Avenue")
+    # Menciona "avenue" en un contexto que NO es la ubicación real, y nunca dice "5th avenue".
+    transcript = [_operator("I was walking down the avenue when I noticed something odd.", at=1010.0)]
+
+    result = score_session(transcript, [], started_at=1000.0, ended_at=1090.0, outcome="ended", location=location)
+
+    assert result["collected"] == []
+    assert any(item.startswith("Street:") for item in result["missing"])
+
+
+def test_location_points_never_advance_time_to_critical_data():
+    # Hallazgo B5 — cualquier punto en all_points solo puede adelantar/igualar
+    # time_to_critical_data (30% del peso). counts_toward_timing=False excluye los puntos de
+    # ubicación de ese cálculo: mencionarla temprano no debe, por sí sola, subir esa categoría.
+    location = ScenarioLocation(scenario_id="s1", street="5th Avenue")
+    # El transcript menciona la calle muy pronto (elapsed=1s) pero NINGÚN otro dato crítico.
+    transcript = [_operator("It happened on 5th Avenue.", at=1001.0)]
+
+    with_location = score_session(
+        transcript, VEHICLE_THEFT_POINTS, started_at=1000.0, ended_at=1090.0, outcome="ended", location=location
+    )
+    without_location = score_session(
+        transcript, VEHICLE_THEFT_POINTS, started_at=1000.0, ended_at=1090.0, outcome="ended"
+    )
+
+    assert with_location["category_scores"]["time_to_critical_data"] == without_location["category_scores"]["time_to_critical_data"]
+    # Pero SÍ cuenta para completeness — las dos categorías se afectan de forma independiente.
+    assert with_location["category_scores"]["completeness"] > without_location["category_scores"]["completeness"]
+
+
+def test_location_with_marker_only_and_no_text_produces_no_scoring_points():
+    # B10 — un marcador sin ningún campo de texto no debe generar puntos que siempre fallan.
+    location = ScenarioLocation(scenario_id="s1", marker_x=0.5, marker_y=0.5)
+
+    result = score_session([], [], started_at=1000.0, ended_at=1090.0, outcome="ended", location=location)
+
+    assert result["collected"] == []
+    assert result["missing"] == []
+    assert result["category_scores"]["completeness"] == 100  # sin puntos = no penaliza (mismo que hoy)

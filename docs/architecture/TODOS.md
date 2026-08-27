@@ -368,3 +368,43 @@ y nunca alterar `scenarios` — ver escenarios-de-video.md, hallazgo Eng 1.2. Si
 sí requiere `ALTER TABLE` sobre una tabla existente, ese es el momento de agregar un
 `schema_version` + runner de migración idempotente, no de repetir el patrón actual y confiar en
 que nadie lo note.
+
+### TODO-21
+**Empaquetado del frontend (Electron/Vite) como compañero del backend empaquetado.** Estado:
+PENDING. Sin dueño nombrado.
+
+`frontend/BACKEND_REQUIREMENTS.md` §2 exige que el backend corra en la misma máquina que tiene
+micrófono y parlantes — confirmado en código (`tts/kokoro.py::KokoroTTS.speak()` usa
+`sd.play()`/`sd.wait()` locales, `audio/microphone.py::MicrophoneRecorder` abre un
+`sd.InputStream` local). Empaquetar solo el backend (ver
+docs/designs/empaquetado-ejecutable-backend.md) deja a la caja del concesionario todavía
+necesitando Node/npm/tooling de Electron dev para correr el frontend — el mismo problema de "hay
+que saber activar un venv" que ese plan resuelve para el backend, solo movido al otro lado. Este
+TODO existe para que "empaquetar el backend" no se lea como "listo para desplegar en un
+concesionario" sin más trabajo. Toolchain distinto (Node/electron-builder, no PyInstaller/uv) —
+plan separado, no una extensión del de backend.
+
+### TODO-22
+**Validar con quien pidió el ejecutable si un binario compilado es un requisito literal.**
+Estado: PENDING. Sin dueño nombrado.
+
+docs/designs/empaquetado-ejecutable-backend.md eligió PyInstaller --onedir (Approach B) sobre un
+Python portátil + venv congelado (Approach C, el de menor riesgo dado el stack de dependencias
+nativas: torch/transformers/ctranslate2/onnxruntime/PortAudio/libsndfile) principalmente porque
+el pedido original mencionó "ejecutable" y sugirió PyInstaller como ejemplo. Nunca se confirmó si
+"algo que simplemente corre, sin necesitar saber Python" (lo que Approach C también daría, incluso
+envuelto en un instalador Inno Setup/MSI) satisface el pedido igual de bien con menos riesgo. No
+bloquea el plan actual — Approach B ya está aprobado y en marcha — pero informa si el PRÓXIMO
+trabajo de empaquetado (ver TODO-21) debería repetir PyInstaller o no.
+
+### TODO-23
+**Mecanismo físico de distribución del artefacto empaquetado hacia la máquina del
+concesionario.** Estado: PENDING. Sin dueño nombrado.
+
+El artefacto de docs/designs/empaquetado-ejecutable-backend.md (carpeta `dist/server_main/` con
+pesos de modelo embebidos) probablemente pesa varios GB una vez que torch/transformers/
+ctranslate2/onnxruntime entran a la cuenta (ver Premisa 5 de ese doc). El plan de build cubre
+cómo se construye el artefacto localmente, pero no cómo llega físicamente a una caja sin soporte
+de TI dedicado (NFR-11) — USB, share de red LAN, disco externo son todas opciones válidas, pero
+ninguna está decidida. Es una decisión operativa del despliegue real, no un cambio de código;
+este TODO existe para que no se resuelva improvisando el día del despliegue.

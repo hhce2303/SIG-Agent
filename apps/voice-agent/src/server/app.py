@@ -24,7 +24,7 @@ import uuid
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette import status
 
 from core.conversation import DISPATCHER_RECOVERY_LINE
@@ -43,6 +43,8 @@ from core.ports import (
     MicrophonePort,
     PersistencePort,
     Scenario,
+    ScenarioLocation,
+    ScenarioLocationPort,
     ScenarioPort,
     ScenarioVideo,
     ScenarioVideoPort,
@@ -56,7 +58,7 @@ from core.ports import (
     VideoGroundTruthPoint,
     VideoTokenPort,
 )
-from core.scoring import score_session
+from core.scoring import is_location_configured, score_session
 from core.transcription_confidence import aggregate_transcription_confidence, rate_transcription_confidence
 from core.turn_state import InvalidTurnTransitionError, TurnStateMachine
 from server.video_probe import probe_mp4_duration_seconds
@@ -111,6 +113,7 @@ class ScenarioOut(ScenarioIn):
     created_at: float
     updated_at: float
     has_video: bool = False  # docs/designs/escenarios-de-video.md — sin cambiar Scenario en sí
+    has_location: bool = False  # docs/designs/ubicacion-del-incidente.md — idem, mismo patrón
 
 
 class VideoGroundTruthPointModel(BaseModel):
@@ -170,6 +173,66 @@ class ScenarioVideoAccessOut(BaseModel):
     content_type: str
     duration_seconds: float
     stream_url: str
+
+
+class ScenarioLocationIn(BaseModel):
+    """Cuerpo de `PUT /scenarios/{id}/location` — docs/designs/ubicacion-del-incidente.md.
+
+    `marker_x`/`marker_y` son `None` hasta que el autor coloca el marcador en el mini-mapa
+    (distingue "sin posicionar" de "posicionado en el default", hallazgo B10 del design doc). El
+    validador rechaza (422) un marcador colocado sin ningún campo de texto — un flag sin calle,
+    cruce, ni referencia no representa nada que el trainee pueda comunicar.
+    """
+
+    street: str = ""
+    cross_street: str = ""
+    landmark: str = ""
+    city_or_zone: str = ""
+    additional_directions: str = ""
+    match_hints: list[str] = Field(default_factory=list)
+    marker_x: float | None = Field(default=None, ge=0.0, le=1.0)
+    marker_y: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _marker_requires_text(self) -> "ScenarioLocationIn":
+        has_text = bool(self.street.strip() or self.cross_street.strip() or self.landmark.strip())
+        has_marker = self.marker_x is not None or self.marker_y is not None
+        if has_marker and not has_text:
+            raise ValueError("a marker position requires at least a street, cross street, or landmark")
+        return self
+
+
+class ScenarioLocationOut(BaseModel):
+    """Vista de autoría (editor) — incluye `match_hints`, igual que `ScenarioVideoOut`. Nunca se
+    manda esta forma al camino de acceso del trainee (`GET /scenarios/{id}/location/brief`)."""
+
+    scenario_id: str
+    street: str
+    cross_street: str
+    landmark: str
+    city_or_zone: str
+    additional_directions: str
+    match_hints: list[str]
+    marker_x: float | None
+    marker_y: float | None
+    created_at: float
+    updated_at: float
+
+
+class ScenarioLocationAccessOut(BaseModel):
+    """Lo que ve el trainee antes de la llamada (`PreCallLocationBriefing`) y en el panel opt-in
+    en vivo (`InCallLocationPanel`) — sin `match_hints` (metadatos de scoring, ver ADR-0010-style
+    en `core/scoring.py`), pero SÍ con el contenido descriptivo completo: a diferencia de
+    `match_hints` en video, esto no es una respuesta correcta oculta — es lo que el trainee debe
+    poder repetir de memoria durante la llamada (0A punto 1 del design doc)."""
+
+    street: str
+    cross_street: str
+    landmark: str
+    city_or_zone: str
+    additional_directions: str
+    marker_x: float | None
+    marker_y: float | None
 
 
 class PromoteVideoIn(BaseModel):
@@ -246,6 +309,9 @@ def create_app(
     # T4: idem — sin configurar, el detalle por-segmento de confianza de Whisper simplemente no
     # se persiste (el agregado en `evaluation_json` sigue funcionando igual, es independiente).
     stt_metrics_store: SttMetricsPort | None = None,
+    # docs/designs/ubicacion-del-incidente.md: idem — sin configurar, el CRUD de ubicación
+    # responde 503 y `score_session` recibe `location=None` (cero cambio de comportamiento).
+    scenario_location_store: ScenarioLocationPort | None = None,
 ) -> FastAPI:
     """Factory (no una `app` global a nivel de módulo) para que los tests puedan inyectar
     dobles de prueba de cada puerto sin compartir estado entre tests ni depender de
@@ -329,21 +395,24 @@ def create_app(
 
     @app.get("/scenarios", response_model=list[ScenarioOut])
     def list_scenarios(claims: SessionTokenClaims = Depends(_bearer_claims)):
-        return [_scenario_out(scenario, scenario_video_store) for scenario in scenario_store.list()]
+        return [
+            _scenario_out(scenario, scenario_video_store, scenario_location_store)
+            for scenario in scenario_store.list()
+        ]
 
     @app.get("/scenarios/{scenario_id}", response_model=ScenarioOut)
     def get_scenario(scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
         scenario = scenario_store.get(scenario_id)
         if scenario is None:
             raise HTTPException(status_code=404, detail="scenario not found")
-        return _scenario_out(scenario, scenario_video_store)
+        return _scenario_out(scenario, scenario_video_store, scenario_location_store)
 
     @app.post("/scenarios", response_model=ScenarioOut, status_code=201)
     def create_scenario(body: ScenarioIn, claims: SessionTokenClaims = Depends(_bearer_claims)):
         scenario = Scenario(id="", **_scenario_fields(body))
         scenario_store.create(scenario)
         log_event(logger, "scenario_created", supervisor_id=claims.supervisor_id, scenario_id=scenario.id)
-        return _scenario_out(scenario, scenario_video_store)
+        return _scenario_out(scenario, scenario_video_store, scenario_location_store)
 
     @app.put("/scenarios/{scenario_id}", response_model=ScenarioOut)
     def update_scenario(
@@ -358,7 +427,7 @@ def create_app(
 
         scenario_store.update(existing)
         log_event(logger, "scenario_updated", supervisor_id=claims.supervisor_id, scenario_id=scenario_id)
-        return _scenario_out(existing, scenario_video_store)
+        return _scenario_out(existing, scenario_video_store, scenario_location_store)
 
     @app.delete("/scenarios/{scenario_id}", status_code=204)
     def delete_scenario(scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
@@ -370,7 +439,86 @@ def create_app(
             # `video_storage_dir`) nunca se toca, no es nuestra para borrar.
             _delete_owned_video_file(scenario_video_store.get(scenario_id))
             scenario_video_store.delete(scenario_id)
+        if scenario_location_store is not None:
+            # Mismo razonamiento que video — no dejar la fila de ubicación colgando.
+            scenario_location_store.delete(scenario_id)
         log_event(logger, "scenario_deleted", supervisor_id=claims.supervisor_id, scenario_id=scenario_id)
+
+    # -----------------------------------------------------------------
+    # Ubicación del incidente — docs/designs/ubicacion-del-incidente.md.
+    # -----------------------------------------------------------------
+
+    def _require_location_feature() -> None:
+        if scenario_location_store is None:
+            raise HTTPException(status_code=503, detail="incident location is not configured on this server")
+
+    @app.get("/scenarios/{scenario_id}/location/brief", response_model=ScenarioLocationAccessOut)
+    def get_scenario_location_brief(
+        scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        """Lo que ve el trainee en `PreCallLocationBriefing`/`InCallLocationPanel` — el contenido
+        completo (a diferencia de video, esto NO es la respuesta oculta, es lo que el trainee debe
+        poder repetir de memoria, ver 0A punto 1 del design doc), sin `match_hints`."""
+
+        _require_location_feature()
+        location = scenario_location_store.get(scenario_id)
+        if location is None or not is_location_configured(location):
+            raise HTTPException(status_code=404, detail="scenario has no location configured")
+
+        return ScenarioLocationAccessOut(
+            street=location.street,
+            cross_street=location.cross_street,
+            landmark=location.landmark,
+            city_or_zone=location.city_or_zone,
+            additional_directions=location.additional_directions,
+            marker_x=location.marker_x,
+            marker_y=location.marker_y,
+        )
+
+    @app.get("/scenarios/{scenario_id}/location", response_model=ScenarioLocationOut)
+    def get_scenario_location(
+        scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        """Vista de autoría (editor) — SÍ incluye `match_hints`, ruta separada de
+        `get_scenario_location_brief` por el mismo motivo que video separa `/video` de
+        `/video/ground-truth`."""
+
+        _require_location_feature()
+        location = scenario_location_store.get(scenario_id)
+        if location is None:
+            raise HTTPException(status_code=404, detail="scenario has no location configured")
+        return _scenario_location_out(location)
+
+    @app.put("/scenarios/{scenario_id}/location", response_model=ScenarioLocationOut)
+    def put_scenario_location(
+        scenario_id: str, body: ScenarioLocationIn, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        _require_location_feature()
+        if scenario_store.get(scenario_id) is None:
+            raise HTTPException(status_code=404, detail="scenario not found")
+
+        existing = scenario_location_store.get(scenario_id)
+        location = ScenarioLocation(
+            scenario_id=scenario_id,
+            street=body.street,
+            cross_street=body.cross_street,
+            landmark=body.landmark,
+            city_or_zone=body.city_or_zone,
+            additional_directions=body.additional_directions,
+            match_hints=body.match_hints,
+            marker_x=body.marker_x,
+            marker_y=body.marker_y,
+            created_at=existing.created_at if existing else 0.0,
+        )
+        scenario_location_store.upsert(location)
+        log_event(logger, "scenario_location_updated", supervisor_id=claims.supervisor_id, scenario_id=scenario_id)
+        return _scenario_location_out(scenario_location_store.get(scenario_id))
+
+    @app.delete("/scenarios/{scenario_id}/location", status_code=204)
+    def delete_scenario_location(scenario_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
+        _require_location_feature()
+        scenario_location_store.delete(scenario_id)
+        log_event(logger, "scenario_location_deleted", supervisor_id=claims.supervisor_id, scenario_id=scenario_id)
 
     # -----------------------------------------------------------------
     # Video de escenarios — docs/designs/escenarios-de-video.md, ADR-0009/ADR-0010.
@@ -712,7 +860,7 @@ def create_app(
             scenario_id=scenario.id,
             with_video=body.video is not None,
         )
-        return _scenario_out(scenario, scenario_video_store)
+        return _scenario_out(scenario, scenario_video_store, scenario_location_store)
 
     @app.get("/impact-report", response_model=ImpactReportModel)
     def get_impact_report(claims: SessionTokenClaims = Depends(_bearer_claims)):
@@ -772,6 +920,12 @@ def create_app(
         stt_segments: list = []
         active_scenario: Scenario | None = None
         active_video: ScenarioVideo | None = None
+        # docs/designs/ubicacion-del-incidente.md — mismo patrón que active_video. A diferencia de
+        # video, no hay ventana de tiempo que "expire" (no hay video.ended equivalente): la
+        # ubicación se puntúa incondicionalmente si está configurada, nunca por una bandera de
+        # "el trainee la vio" (ver Fase 3 Sección 1 del design doc, hallazgo B1/B2 — ese mecanismo
+        # se descartó por ser un exploit de scoring controlado por el cliente).
+        active_location: ScenarioLocation | None = None
         call_config = {"difficulty": "", "language": "", "training_type": ""}
         call_ended = False  # True una vez que un `call.end` explícito ya persistió la sesión.
         call_started_once = False  # Evita persistir un registro fantasma si nunca hubo `call.start`.
@@ -789,7 +943,10 @@ def create_app(
         async def send_scenarios() -> None:
             await send({
                 "event": "scenarios.data",
-                "scenarios": [_scenario_summary(s, scenario_video_store) for s in scenario_store.list()],
+                "scenarios": [
+                    _scenario_summary(s, scenario_video_store, scenario_location_store)
+                    for s in scenario_store.list()
+                ],
             })
 
         async def send_history() -> None:
@@ -886,7 +1043,7 @@ def create_app(
             return None
 
         async def finish_call(outcome: str) -> None:
-            nonlocal call_ended, active_scenario, active_video
+            nonlocal call_ended, active_scenario, active_video, active_location
 
             # T15 — guarda de carrera de 2 conexiones (docs/designs/motor-de-metricas.md, hallazgo
             # de la voz independiente de ingeniería): el frontend reconecta automáticamente tras
@@ -927,6 +1084,7 @@ def create_app(
                 video_ground_truth=video_ground_truth,
                 video_ended_at=reaction_video_ended_at,
                 turn_history=machine.history,
+                location=active_location,
             )
 
             # T4/T13/T14 (docs/designs/motor-de-metricas.md): `score_session` es puro (ADR-0006)
@@ -1018,6 +1176,7 @@ def create_app(
 
             active_scenario = None
             active_video = None
+            active_location = None
 
         try:
             await send({"event": "system.ready", "version": PROTOCOL_VERSION})
@@ -1054,6 +1213,9 @@ def create_app(
 
                     active_scenario = scenario
                     active_video = scenario_video_store.get(scenario.id) if scenario_video_store else None
+                    active_location = (
+                        scenario_location_store.get(scenario.id) if scenario_location_store else None
+                    )
                     call_config = {
                         "difficulty": message.get("difficulty", ""),
                         "language": message.get("language", ""),
@@ -1078,6 +1240,7 @@ def create_app(
                         await send({"event": "call.status", "status": "error"})
                         active_scenario = None
                         active_video = None
+                        active_location = None
                         continue
 
                     call_started_once = True
@@ -1085,7 +1248,7 @@ def create_app(
                     await send({
                         "event": "call.started",
                         "sessionId": session_id,
-                        "scenario": _scenario_summary(scenario, scenario_video_store),
+                        "scenario": _scenario_summary(scenario, scenario_video_store, scenario_location_store),
                     })
                     await send({"event": "call.status", "status": "connected"})
 
@@ -1263,7 +1426,21 @@ def _has_video(scenario_video_store: ScenarioVideoPort | None, scenario_id: str)
     return scenario_video_store is not None and scenario_video_store.get(scenario_id) is not None
 
 
-def _scenario_summary(scenario: Scenario, scenario_video_store: ScenarioVideoPort | None = None) -> dict:
+def _has_location(scenario_location_store: ScenarioLocationPort | None, scenario_id: str) -> bool:
+    # docs/designs/ubicacion-del-incidente.md — mirrorea _has_video. Nota de performance (Fase 3
+    # Sección 4, hallazgo A2): esto repite el mismo N+1 pre-existente que ya tiene `_has_video` en
+    # listados de escenarios (una query por escenario listado) — no se introduce un patrón nuevo,
+    # se documenta como TODO de batch-fetch (`list_configured_scenario_ids()`) en TODOS.md.
+    if scenario_location_store is None:
+        return False
+    return is_location_configured(scenario_location_store.get(scenario_id))
+
+
+def _scenario_summary(
+    scenario: Scenario,
+    scenario_video_store: ScenarioVideoPort | None = None,
+    scenario_location_store: ScenarioLocationPort | None = None,
+) -> dict:
     return {
         "id": scenario.id,
         "title": scenario.title,
@@ -1271,10 +1448,15 @@ def _scenario_summary(scenario: Scenario, scenario_video_store: ScenarioVideoPor
         "description": scenario.description,
         "difficulty": scenario.difficulty,
         "has_video": _has_video(scenario_video_store, scenario.id),
+        "has_location": _has_location(scenario_location_store, scenario.id),
     }
 
 
-def _scenario_out(scenario: Scenario, scenario_video_store: ScenarioVideoPort | None = None) -> ScenarioOut:
+def _scenario_out(
+    scenario: Scenario,
+    scenario_video_store: ScenarioVideoPort | None = None,
+    scenario_location_store: ScenarioLocationPort | None = None,
+) -> ScenarioOut:
     return ScenarioOut(
         id=scenario.id,
         title=scenario.title,
@@ -1290,6 +1472,23 @@ def _scenario_out(scenario: Scenario, scenario_video_store: ScenarioVideoPort | 
         created_at=scenario.created_at,
         updated_at=scenario.updated_at,
         has_video=_has_video(scenario_video_store, scenario.id),
+        has_location=_has_location(scenario_location_store, scenario.id),
+    )
+
+
+def _scenario_location_out(location: ScenarioLocation) -> ScenarioLocationOut:
+    return ScenarioLocationOut(
+        scenario_id=location.scenario_id,
+        street=location.street,
+        cross_street=location.cross_street,
+        landmark=location.landmark,
+        city_or_zone=location.city_or_zone,
+        additional_directions=location.additional_directions,
+        match_hints=location.match_hints,
+        marker_x=location.marker_x,
+        marker_y=location.marker_y,
+        created_at=location.created_at,
+        updated_at=location.updated_at,
     )
 
 

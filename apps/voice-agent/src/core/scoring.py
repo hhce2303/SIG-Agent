@@ -31,7 +31,7 @@ LLM, con su propio análisis de costo/latencia — no se descartó, solo se reso
 import os
 from dataclasses import dataclass
 
-from core.ports import CriticalDataPoint, VideoGroundTruthPoint
+from core.ports import CriticalDataPoint, ScenarioLocation, VideoGroundTruthPoint
 from core.turn_latency import compute_response_latency, rate_response_latency
 from core.turn_state import TurnTransition
 
@@ -84,6 +84,7 @@ def score_session(
     video_ground_truth: list[VideoGroundTruthPoint] | None = None,
     video_ended_at: float | None = None,
     turn_history: list[TurnTransition] | None = None,
+    location: ScenarioLocation | None = None,
 ) -> dict | None:
     """Devuelve un dict con la forma exacta de `Evaluation` (`frontend/src/types.ts`), o `None`.
 
@@ -118,7 +119,12 @@ def score_session(
 
     weights = weights or ScoreWeights.from_env()
     video_ground_truth = video_ground_truth or []
-    all_points = [*critical_data_points, *video_ground_truth]
+    # docs/designs/ubicacion-del-incidente.md (ADR-0010-style: mismo mecanismo, sin categoría
+    # ponderada nueva). Se puntúa incondicionalmente si hay ubicación configurada — nunca una
+    # exención por "el trainee se saltó la pantalla de pre-llamada" (el borrador inicial de esa
+    # revisión proponía justo eso y la voz independiente de ingeniería lo marcó como un exploit de
+    # scoring controlado por el cliente sin persistencia real; se eliminó del diseño final).
+    all_points = [*critical_data_points, *video_ground_truth, *_location_critical_points(location)]
 
     completeness, collected, missing = _completeness(transcript, all_points)
     time_score = _time_to_critical_data(transcript, all_points, started_at)
@@ -178,6 +184,15 @@ def _matches_point(text_lower: str, point: CriticalDataPoint) -> bool:
     if any(hint.strip() and hint.strip().lower() in text_lower for hint in point.match_hints):
         return True
 
+    # docs/designs/ubicacion-del-incidente.md, Fase 3 Sección 1 — `word_fallback=False` apaga este
+    # último recurso para puntos cuyo `label` es contenido real (ej. "Street: 5th Avenue"), no una
+    # etiqueta de UI genérica: sin este flag, "avenue"/"street" sueltos en cualquier transcript
+    # marcarían el punto como cumplido. `getattr` con default `True` porque `VideoGroundTruthPoint`
+    # (mezclado en la misma lista de `all_points`, ver ADR-0010) no tiene este campo — mismo
+    # comportamiento de siempre para video y para cualquier `CriticalDataPoint` ya autorado.
+    if not getattr(point, "word_fallback", True):
+        return False
+
     # Coincidencia permisiva a nivel de palabra sobre el label — último recurso para escenarios
     # sin match_hints todavía. Ver docstring del módulo sobre por qué esto es una heurística y no
     # extracción semántica real.
@@ -200,6 +215,12 @@ def _completeness(
 def _time_to_critical_data(
     transcript: list[dict], points: list[CriticalDataPoint], started_at: float
 ) -> float | None:
+    # docs/designs/ubicacion-del-incidente.md, Fase 3 Sección 1 (hallazgo B5) — cualquier punto
+    # nuevo en `all_points` solo puede adelantar o igualar esta categoría (30% del peso total),
+    # nunca atrasarla, porque el loop de abajo se detiene en la PRIMERA mención de CUALQUIER punto.
+    # Agregar puntos sin pensarlo re-pesa silenciosamente la categoría más pesada del score.
+    # `counts_toward_timing=False` los excluye de este cálculo (siguen contando para completeness).
+    points = [p for p in points if getattr(p, "counts_toward_timing", True)]
     if not points:
         return None
 
@@ -218,6 +239,53 @@ def _time_to_critical_data(
         return 100.0 * (1 - (elapsed - TIME_TO_CRITICAL_TARGET_SECONDS) / span)
 
     return 0.0  # ningún turno del supervisor mencionó un dato crítico
+
+
+def is_location_configured(location: ScenarioLocation | None) -> bool:
+    """Regla única de "¿hay ubicación configurada?" — docs/designs/ubicacion-del-incidente.md,
+    Fase 3 Sección 1 (hallazgo B9). El endpoint `PUT /scenarios/{id}/location` (`server/app.py`) es
+    la única fuente de verdad autoritativa (rechaza con 422 un marcador sin texto); el frontend
+    duplica esta misma regla solo como UX (deshabilitar guardado antes de golpear el 422) — no
+    comparten código real entre Python y TypeScript, se documenta como copia, no como "una sola
+    función compartida".
+    """
+
+    if location is None:
+        return False
+    return bool(location.street.strip() or location.cross_street.strip() or location.landmark.strip())
+
+
+def _location_critical_points(location: ScenarioLocation | None) -> list[CriticalDataPoint]:
+    """Deriva 0-3 `CriticalDataPoint`s planos desde `ScenarioLocation` — uno por campo de texto no
+    vacío (calle/cruce/referencia). Reusa `CriticalDataPoint` en vez de una entidad de ground-truth
+    paralela (a diferencia de `VideoGroundTruthPoint`, que sí lo justifica por tener campos
+    estructurales propios — ver ADR-0010): calle/cruce/referencia no necesitan nada que
+    `CriticalDataPoint` no tenga ya. `word_fallback=False`/`counts_toward_timing=False` en los tres
+    — ver comentarios en `CriticalDataPoint` (`core/ports.py`) y en `_time_to_critical_data` arriba.
+    """
+
+    if not is_location_configured(location):
+        return []  # nunca generar puntos vacíos que siempre fallan
+
+    fields = (
+        ("location_street", "Street", location.street),
+        ("location_cross_street", "Cross street", location.cross_street),
+        ("location_landmark", "Landmark", location.landmark),
+    )
+    points = []
+    for key, field_label, value in fields:
+        if value.strip():
+            points.append(
+                CriticalDataPoint(
+                    key=key,
+                    label=f"{field_label}: {value.strip()}",
+                    match_hints=[value.strip(), *location.match_hints],
+                    required=True,
+                    word_fallback=False,
+                    counts_toward_timing=False,
+                )
+            )
+    return points
 
 
 def _video_reaction_seconds(

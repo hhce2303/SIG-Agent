@@ -181,6 +181,19 @@ class CriticalDataPoint:
     # (default vacío = mismo comportamiento que antes de este campo), pero se recomienda
     # completarlo para cualquier escenario nuevo. Ver `core/scoring.py::_matches_point`.
     match_hints: list[str] = field(default_factory=list)
+    # docs/designs/ubicacion-del-incidente.md (autoplan 2026-08-21/22), Fase 3 Sección 1 —
+    # agregados tras un hallazgo crítico de la voz independiente de ingeniería: usar el valor real
+    # configurado (ej. "5th Avenue") como `label` para evitar nombres genéricos (0A-5) activaba el
+    # fallback de palabra suelta de abajo — "avenue"/"street" sueltos en CUALQUIER transcript
+    # marcarían el punto como cumplido. `word_fallback=False` apaga ese último recurso para puntos
+    # cuyo label es contenido real, no una etiqueta de UI genérica (default `True` = cero cambio de
+    # comportamiento para cualquier punto ya autorado). `counts_toward_timing=False` excluye el
+    # punto de `_time_to_critical_data` — cualquier punto nuevo en `all_points` solo puede adelantar
+    # o igualar esa categoría (30% del peso total), nunca atrasarla; para datos que no deben
+    # re-ponderar silenciosamente esa categoría (ver ubicación del incidente), se apaga (default
+    # `True` = cero cambio de comportamiento existente).
+    word_fallback: bool = True
+    counts_toward_timing: bool = True
 
 
 @dataclass
@@ -266,6 +279,54 @@ class ScenarioVideoPort(Protocol):
         ...
 
     def upsert(self, video: ScenarioVideo) -> None:
+        ...
+
+    def delete(self, scenario_id: str) -> None:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Ubicación del incidente — docs/designs/ubicacion-del-incidente.md (autoplan 2026-08-21/22).
+# Relación 1:1 con `Scenario` (PK = scenario_id), mismo patrón que `ScenarioVideo` — tabla propia
+# (`SQLiteScenarioLocationStore`), nunca `ALTER TABLE scenarios` (TODO-20). A diferencia de
+# `VideoGroundTruthPoint`, la ubicación NO introduce una entidad de ground-truth paralela para
+# scoring: `core/scoring.py::_location_critical_points()` deriva `CriticalDataPoint`s planos
+# (uno por campo de texto no vacío) a partir de este dataclass — reusa el mecanismo existente en
+# vez de duplicar `key`/`label`/`match_hints` en una clase nueva (hallazgo de la voz independiente
+# de ingeniería: una clase con los mismos 4 campos que `CriticalDataPoint` ya tiene es una clase de
+# más). El mini-mapa (frontend) es el único lugar que interpreta `marker_x`/`marker_y` como
+# geometría — el backend los persiste como floats opacos, sin significado espacial de este lado.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScenarioLocation:
+    scenario_id: str
+    street: str = ""
+    cross_street: str = ""
+    landmark: str = ""
+    city_or_zone: str = ""
+    # Narrativo — nunca entra a `match_hints`/scoring (ver Fase 2 Pass 7 decisión #3 del design
+    # doc): texto libre sin match_hints es garantía de falsos negativos en `_matches_point`.
+    additional_directions: str = ""
+    # Sinónimos/frases alternativas extra, autor-editable, aplicados a los 3 campos de texto de
+    # arriba en conjunto (no por campo — mantiene el shape simple; ver design doc Fase 3).
+    match_hints: list[str] = field(default_factory=list)
+    # `None` = "sin posicionar" — distingue "el autor no colocó el marcador" de "el marcador está
+    # en el default 0.5/0.5" (hallazgo B10 del design doc: sin esto, la regla de "marcador sin
+    # texto no cuenta como configurado" no es expresable).
+    marker_x: float | None = None
+    marker_y: float | None = None
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
+@runtime_checkable
+class ScenarioLocationPort(Protocol):
+    def get(self, scenario_id: str) -> ScenarioLocation | None:
+        ...
+
+    def upsert(self, location: ScenarioLocation) -> None:
         ...
 
     def delete(self, scenario_id: str) -> None:

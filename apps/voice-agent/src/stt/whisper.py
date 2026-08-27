@@ -29,9 +29,16 @@ class WhisperSTT(SpeechToTextPort):
         model_size: str = "small",
         device: str = "cpu",
         compute_type: str = "int8",
+        model_path: str | None = None,
     ):
+        """`model_path` (docs/designs/empaquetado-ejecutable-backend.md, Premisas 2/4): ruta
+        local a un snapshot CTranslate2 ya descargado (vía `scripts/fetch_models.py` +
+        `faster_whisper.download_model()`) — `WhisperModel` acepta esa ruta directamente en el
+        mismo primer argumento que normalmente lleva un `model_size` como `"small"`. Si no se
+        pasa, cae al comportamiento actual (descarga de HuggingFace por `model_size`) — usado
+        por el prototipo CLI (`main.py`) y en desarrollo local con internet."""
         self.model = WhisperModel(
-            model_size,
+            model_path or model_size,
             device=device,
             compute_type=compute_type,
         )

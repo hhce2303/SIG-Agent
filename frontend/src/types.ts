@@ -7,6 +7,9 @@ export type ScenarioSummary = {
   // docs/designs/escenarios-de-video.md — deriva de si el escenario tiene un ScenarioVideo
   // adjunto en el backend; `Scenario` en sí no cambió (ver ADR-0009/ADR-0010).
   has_video: boolean
+  // docs/designs/ubicacion-del-incidente.md — idem, deriva de si hay un ScenarioLocation con al
+  // menos un campo de texto configurado (`core/scoring.py::is_location_configured`).
+  has_location: boolean
 }
 
 // Fase 2 (roadmap, TODO-11 resuelto: campos estructurados + narrativa libre). `ScenarioSummary`
@@ -73,6 +76,38 @@ export type ScenarioVideoInput = {
   duration_seconds: number
   content_type: string
   ground_truth_points: VideoGroundTruthPointDef[]
+}
+
+// Ubicación del incidente — docs/designs/ubicacion-del-incidente.md. A diferencia de video, el
+// contenido descriptivo (calle/cruce/referencia) NO es la respuesta oculta — el trainee lo ve
+// antes de la llamada (PreCallLocationBriefing) y opcionalmente durante (InCallLocationPanel).
+// Solo `match_hints` (las frases de scoring) se quedan en la vista de autoría.
+export type ScenarioLocationAccess = {
+  street: string
+  cross_street: string
+  landmark: string
+  city_or_zone: string
+  additional_directions: string
+  marker_x: number | null
+  marker_y: number | null
+}
+
+export type ScenarioLocationDetail = ScenarioLocationAccess & {
+  scenario_id: string
+  match_hints: string[]
+  created_at: number
+  updated_at: number
+}
+
+export type ScenarioLocationInput = {
+  street: string
+  cross_street: string
+  landmark: string
+  city_or_zone: string
+  additional_directions: string
+  match_hints: string[]
+  marker_x: number | null
+  marker_y: number | null
 }
 
 export type TranscriptEntry = { role: 'operator' | 'dispatcher'; text: string; seconds: number }

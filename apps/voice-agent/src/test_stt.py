@@ -159,6 +159,29 @@ def test_transcribe_preserves_language_probability():
     assert result.language_probability == 0.97
 
 
+def test_model_path_overrides_model_size_when_provided():
+    """docs/designs/empaquetado-ejecutable-backend.md, Premisa 2: `WHISPER_MODEL_PATH` (resuelto
+    por `server_main.py`) debe pisar `model_size` — `WhisperModel` acepta una ruta local en el
+    mismo primer argumento posicional que un size string como `"small"`."""
+
+    with patch("stt.whisper.WhisperModel") as MockModel:
+        WhisperSTT(model_size="small", model_path="/models/whisper/ct2-snapshot")
+
+    args, _ = MockModel.call_args
+    assert args[0] == "/models/whisper/ct2-snapshot"
+
+
+def test_model_size_used_when_no_model_path_given():
+    """Comportamiento actual sin cambios cuando no se configura `WHISPER_MODEL_PATH` -- el modo
+    esperado en desarrollo local (`main.py`) y cuando el ejecutable no está empaquetado."""
+
+    with patch("stt.whisper.WhisperModel") as MockModel:
+        WhisperSTT(model_size="small")
+
+    args, _ = MockModel.call_args
+    assert args[0] == "small"
+
+
 def test_transcribe_missing_confidence_fields_default_instead_of_raising():
     """Un stub mínimo (o una versión vieja de faster-whisper) sin `no_speech_prob`/
     `compression_ratio` no debe romper la transcripción real — son campos de métricas

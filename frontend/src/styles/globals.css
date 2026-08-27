@@ -158,6 +158,33 @@ h1,h2,h3,p { margin: 0; }
 .in-call-video-frame { position:relative; width:min(360px,80vw); padding:10px; }
 .in-call-video-el { width:100%; border-radius:8px; background:#000; display:block; }
 .in-call-video-close { position:absolute; top:-10px; right:-10px; width:28px; height:28px; border-radius:50%; border:1px solid var(--border); background:#0b1c2e; color:#d8e4ef; display:grid; place-items:center; cursor:pointer; }
+
+/* Ubicación del incidente — docs/designs/ubicacion-del-incidente.md. Mismo tema/patrón que las
+   reglas de video de arriba a propósito (Pass 5 de la revisión: reusa el vocabulario existente,
+   nunca inventa uno nuevo). */
+.pre-call-location-briefing { grid-template-rows:98px minmax(0,1fr); }
+.location-gate-card { gap:14px; }
+.location-gate-text { display:flex; flex-direction:column; gap:4px; color:#d8e4ef; font-size:14px; margin-top:4px; }
+.location-gate-text strong { color:var(--muted); font-weight:500; margin-right:4px; }
+.location-gate-briefing { width:min(560px,90%); max-height:22vh; overflow-y:auto; color:var(--muted); font-size:13px; margin-top:4px; }
+.location-gate-briefing summary { cursor:pointer; color:#5aa4ff; }
+.location-gate-briefing p { margin-top:8px; line-height:1.5; }
+
+.in-call-location-panel { position:fixed; right:24px; bottom:236px; z-index:20; display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
+.in-call-location-frame { position:relative; width:min(300px,80vw); padding:14px; }
+.in-call-location-close { position:absolute; top:-10px; right:-10px; width:28px; height:28px; border-radius:50%; border:1px solid var(--border); background:#0b1c2e; color:#d8e4ef; display:grid; place-items:center; cursor:pointer; }
+.in-call-location-text { display:flex; flex-direction:column; gap:4px; color:#d8e4ef; font-size:12px; margin-top:10px; }
+.in-call-location-text strong { color:var(--muted); font-weight:500; margin-right:4px; }
+
+.location-minimap-wrap { display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:6px; }
+.location-minimap { border-radius:12px; }
+.location-minimap:focus-visible { outline:2px solid var(--primary); outline-offset:3px; }
+.location-minimap-live-region { color:var(--muted); font-size:11px; text-align:center; }
+.location-minimap-editor { display:flex; flex-direction:column; align-items:center; gap:6px; margin:4px 0; }
+
+.scenario-location-more-toggle { font-size:12px; margin:-4px 0 4px; }
+.location-review-overlay { display:flex; flex-direction:column; align-items:center; gap:6px; margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border-soft); }
+.location-review-heading { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.4px; margin:0; }
 .call-controls { border-top:1px solid var(--border-soft); display:grid; grid-template-columns:220px minmax(240px,1fr) minmax(240px,1fr) minmax(180px,.8fr) 210px; align-items:center; gap:14px; padding:22px 48px; background:rgba(4,16,28,.9); }
 .call-controls.functional-controls { grid-template-columns:220px minmax(260px,1fr) minmax(210px,.7fr) 210px; }
 .record-button { min-height:58px; border-radius:10px; border:1px solid #4597ff; background:linear-gradient(180deg,#2f8dff,#126fea); color:white; font-weight:600; display:flex; align-items:center; justify-content:center; gap:10px; cursor:pointer; }

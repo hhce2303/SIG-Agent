@@ -1,20 +1,35 @@
-import { AlertCircle, ArrowLeft, Film, Plus, Save, Trash2, Upload, X } from 'lucide-react'
+import { AlertCircle, Film, MapPin, ArrowLeft, Plus, Save, Trash2, Upload, X } from 'lucide-react'
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import AppShell from '../components/AppShell'
+import LocationMiniMap from '../components/LocationMiniMap'
 import {
   createScenario,
   deleteScenario,
+  deleteScenarioLocation,
   deleteScenarioVideo,
   getScenario,
+  getScenarioLocation,
   getScenarioVideoGroundTruth,
   httpBaseFrom,
+  putScenarioLocation,
   putScenarioVideo,
   updateScenario,
   uploadVideo,
 } from '../lib/api'
 import { useEngineStore } from '../stores/engineStore'
-import type { CriticalDataPointDef, ScenarioInput, VideoGroundTruthPointDef } from '../types'
+import type { CriticalDataPointDef, ScenarioInput, ScenarioLocationInput, VideoGroundTruthPointDef } from '../types'
+
+const EMPTY_LOCATION: ScenarioLocationInput = {
+  street: '',
+  cross_street: '',
+  landmark: '',
+  city_or_zone: '',
+  additional_directions: '',
+  match_hints: [],
+  marker_x: null,
+  marker_y: null,
+}
 
 const EMPTY_SCENARIO: ScenarioInput = {
   title: '',
@@ -65,6 +80,14 @@ export default function ScenarioEditorPage() {
   const [uploadedFileName, setUploadedFileName] = useState<string>()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Ubicación del incidente (docs/designs/ubicacion-del-incidente.md) — mismo gate que video:
+  // solo tiene sentido una vez que el escenario ya existe.
+  const [hasLocation, setHasLocation] = useState(false)
+  const [location, setLocation] = useState<ScenarioLocationInput>(EMPTY_LOCATION)
+  const [locationSaving, setLocationSaving] = useState(false)
+  const [locationError, setLocationError] = useState<string>()
+  const [showMoreLocationDetails, setShowMoreLocationDetails] = useState(false)
+
   useEffect(() => {
     if (!isEditing || !authToken) return
     getScenario(httpBase, authToken, scenarioId!)
@@ -91,6 +114,25 @@ export default function ScenarioEditorPage() {
         setGroundTruthPoints(video.ground_truth_points.length ? video.ground_truth_points : [EMPTY_GROUND_TRUTH_POINT])
       })
       .catch(() => setHasVideo(false))  // 404 = sin video todavía, no es un error real que mostrar
+  }, [isEditing, scenarioId, authToken, httpBase])
+
+  useEffect(() => {
+    if (!isEditing || !authToken) return
+    getScenarioLocation(httpBase, authToken, scenarioId!)
+      .then((loc) => {
+        if (!loc) return  // sin ubicación todavía, no es un error real que mostrar
+        setHasLocation(true)
+        setLocation({
+          street: loc.street,
+          cross_street: loc.cross_street,
+          landmark: loc.landmark,
+          city_or_zone: loc.city_or_zone,
+          additional_directions: loc.additional_directions,
+          match_hints: loc.match_hints,
+          marker_x: loc.marker_x,
+          marker_y: loc.marker_y,
+        })
+      })
   }, [isEditing, scenarioId, authToken, httpBase])
 
   const updatePoint = (index: number, patch: Partial<CriticalDataPointDef>) => {
@@ -199,6 +241,46 @@ export default function ScenarioEditorPage() {
     setVideoPath('')
     setVideoDuration(0)
     setGroundTruthPoints([EMPTY_GROUND_TRUTH_POINT])
+    refreshScenarios()
+  }
+
+  // B8/Fase 3 Sección 1: la MISMA regla que `core/scoring.py::is_location_configured` — el
+  // backend es la fuente autoritativa (rechaza con 422), esto es solo UX para no dejar que el
+  // autor golpee ese 422 sin necesidad.
+  const locationHasText = Boolean(
+    location.street.trim() || location.cross_street.trim() || location.landmark.trim(),
+  )
+  const locationHasMarker = location.marker_x !== null && location.marker_y !== null
+  const canSaveLocation = locationHasText || !locationHasMarker
+
+  const saveLocation = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!authToken || !scenarioId || !canSaveLocation) return
+    setLocationSaving(true)
+    setLocationError(undefined)
+    try {
+      await putScenarioLocation(httpBase, authToken, scenarioId, {
+        ...location,
+        street: location.street.trim(),
+        cross_street: location.cross_street.trim(),
+        landmark: location.landmark.trim(),
+        city_or_zone: location.city_or_zone.trim(),
+      })
+      setHasLocation(true)
+      refreshScenarios()  // el picker de Home/Scenarios necesita el `has_location` fresco
+    } catch (err) {
+      setLocationError(err instanceof Error ? err.message : 'Failed to save location.')
+    } finally {
+      setLocationSaving(false)
+    }
+  }
+
+  const removeLocation = async () => {
+    if (!authToken || !scenarioId) return
+    if (!window.confirm('Remove this location from the scenario? The trainee will no longer see it before the call.')) return
+    await deleteScenarioLocation(httpBase, authToken, scenarioId)
+    setHasLocation(false)
+    setLocation(EMPTY_LOCATION)
     refreshScenarios()
   }
 
@@ -338,6 +420,94 @@ export default function ScenarioEditorPage() {
 
             <div className="page-actions">
               <button className="blue-button" type="submit" disabled={videoSaving}><Save size={17} />{videoSaving ? 'Saving…' : hasVideo ? 'Update video' : 'Attach video'}</button>
+            </div>
+          </form>
+        )}
+
+        {isEditing && (
+          <form className="panel settings-form scenario-editor-form scenario-location-form" onSubmit={saveLocation}>
+            <div className="scenario-points-header">
+              <span className="scenario-video-heading"><MapPin size={17} />Incident location (optional)</span>
+              {hasLocation && <button type="button" className="secondary-button" onClick={removeLocation}><X size={15} />Remove location</button>}
+            </div>
+            <p className="scenario-editor-hint">
+              This is shown to the trainee before the call (and again, on request, during it) — it's what they need to be able to repeat back to the dispatcher, not a hidden answer key. Only the match hints below stay hidden; everything else is content the trainee sees.
+            </p>
+
+            {locationError && <div className="call-notice error scenario-editor-error"><AlertCircle size={16} /><span>{locationError}</span></div>}
+
+            {/* F3 (design doc) — texto primero: no tiene sentido posicionar un flag con
+                significado antes de que exista una calle que dibujar. */}
+            <div className="scenario-editor-grid">
+              <label><span>Street</span>
+                <input placeholder="5th Avenue" value={location.street} onChange={(e) => setLocation({ ...location, street: e.target.value })} />
+              </label>
+              <label><span>Cross street</span>
+                <input placeholder="Main Street" value={location.cross_street} onChange={(e) => setLocation({ ...location, cross_street: e.target.value })} />
+              </label>
+              <label><span>Landmark</span>
+                <input placeholder="Westfield Shopping Center" value={location.landmark} onChange={(e) => setLocation({ ...location, landmark: e.target.value })} />
+              </label>
+              <label><span>Zone / city (optional, not scored)</span>
+                <input placeholder="Downtown" value={location.city_or_zone} onChange={(e) => setLocation({ ...location, city_or_zone: e.target.value })} />
+              </label>
+            </div>
+
+            <div className="location-minimap-editor">
+              <LocationMiniMap
+                mode="author"
+                value={{
+                  street: location.street,
+                  crossStreet: location.cross_street,
+                  landmark: location.landmark,
+                  markerX: location.marker_x,
+                  markerY: location.marker_y,
+                }}
+                onMarkerChange={(x, y) => setLocation({ ...location, marker_x: x, marker_y: y })}
+              />
+              {!locationHasText && (
+                <p className="empty-copy">Enter a street name (or cross street/landmark) to place the marker on the map.</p>
+              )}
+            </div>
+
+            <label>
+              <span>Match hints — alternate phrasings a trainee might use, comma-separated (optional)</span>
+              <input
+                className="scenario-point-hints"
+                placeholder="fifth ave, corner of 5th"
+                value={location.match_hints.join(', ')}
+                onChange={(e) => setLocation({ ...location, match_hints: parseHints(e.target.value) })}
+                title="Same mechanism as critical data points (TODO-17) — these are compared against what the trainee says, not the field values themselves"
+              />
+            </label>
+
+            <button
+              type="button"
+              className="text-link scenario-location-more-toggle"
+              onClick={() => setShowMoreLocationDetails((value) => !value)}
+            >
+              {showMoreLocationDetails ? 'Hide' : 'Show'} additional directions
+            </button>
+            {showMoreLocationDetails && (
+              <label>
+                <span>Additional directions (narrative only — never scored)</span>
+                <textarea
+                  className="scenario-briefing"
+                  rows={3}
+                  placeholder="Behind the parking garage, near the loading dock…"
+                  value={location.additional_directions}
+                  onChange={(e) => setLocation({ ...location, additional_directions: e.target.value })}
+                />
+              </label>
+            )}
+            <p className="scenario-editor-hint">
+              The marker's position doesn't affect scoring — it's a visual reference for you and the trainee. Only street/cross street/landmark text (matched against what the trainee says) counts toward completeness.
+            </p>
+
+            <div className="page-actions">
+              <button className="blue-button" type="submit" disabled={locationSaving || !canSaveLocation}>
+                <Save size={17} />{locationSaving ? 'Saving…' : hasLocation ? 'Update location' : 'Save location'}
+              </button>
             </div>
           </form>
         )}

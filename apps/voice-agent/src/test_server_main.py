@@ -11,6 +11,8 @@ repo.
 import os
 import tempfile
 
+import pytest
+
 _TMP_DIR = tempfile.mkdtemp(prefix="voice-agent-test-")
 os.environ.setdefault("SESSION_TOKEN_SECRET", "test-secret")
 os.environ.setdefault("SUPERVISOR_PASSPHRASE", "test-pass")
@@ -52,3 +54,64 @@ def test_server_host_and_port_are_configurable(monkeypatch):
 
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 9443
+
+
+def test_server_port_falls_back_to_default_when_set_but_empty(monkeypatch):
+    """docs/designs/empaquetado-ejecutable-backend.md, Premisa 7: una variable presente pero
+    vacía (`SERVER_PORT=`, exactamente el patrón que `.env.example` invita a dejar) debe caer al
+    default, no romper con un `ValueError` al hacer `int("")`."""
+    monkeypatch.setenv("DISABLE_TLS", "1")
+    monkeypatch.setenv("SERVER_PORT", "")
+
+    kwargs = server_main.build_uvicorn_kwargs()
+
+    assert kwargs["port"] == 8000
+
+
+class TestRequireEnv:
+    """`_require_env` (Premisa 7) — fail-fast con mensaje claro, no un traceback crudo."""
+
+    def test_passes_silently_when_all_vars_present_and_non_empty(self, monkeypatch):
+        monkeypatch.setenv("FOO", "bar")
+
+        server_main._require_env("FOO")  # no debe lanzar SystemExit
+
+    def test_exits_nonzero_when_a_required_var_is_missing(self, monkeypatch, capsys):
+        monkeypatch.delenv("DEFINITELY_NOT_SET", raising=False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            server_main._require_env("DEFINITELY_NOT_SET")
+
+        assert exc_info.value.code == 1
+        assert "DEFINITELY_NOT_SET" in capsys.readouterr().err
+
+    def test_exits_nonzero_when_a_required_var_is_present_but_empty(self, monkeypatch, capsys):
+        """El gap real: `.env.example` ya ejercita este patrón (`WHISPER_MODEL_PATH=` en
+        blanco) -- `os.getenv(key)` es falsy tanto para ausente como para vacío."""
+        monkeypatch.setenv("BLANK_VAR", "")
+
+        with pytest.raises(SystemExit) as exc_info:
+            server_main._require_env("BLANK_VAR")
+
+        assert exc_info.value.code == 1
+        assert "BLANK_VAR" in capsys.readouterr().err
+
+
+class TestRequirePaths:
+    """`_require_paths` (Premisa 7) — validación de rutas de modelo AL ARRANQUE, no en medio de
+    una llamada de audio en vivo."""
+
+    def test_passes_silently_when_path_exists(self, tmp_path):
+        existing = tmp_path / "model.bin"
+        existing.write_text("fake")
+
+        server_main._require_paths(SOME_MODEL=str(existing))  # no debe lanzar SystemExit
+
+    def test_exits_nonzero_when_a_path_does_not_exist(self, tmp_path, capsys):
+        missing = tmp_path / "does-not-exist.bin"
+
+        with pytest.raises(SystemExit) as exc_info:
+            server_main._require_paths(SOME_MODEL=str(missing))
+
+        assert exc_info.value.code == 1
+        assert str(missing) in capsys.readouterr().err

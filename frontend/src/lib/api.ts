@@ -8,6 +8,9 @@ import type {
   IncidentOutcome,
   ScenarioDetail,
   ScenarioInput,
+  ScenarioLocationAccess,
+  ScenarioLocationDetail,
+  ScenarioLocationInput,
   ScenarioVideoAccess,
   ScenarioVideoDetail,
   ScenarioVideoInput,
@@ -110,6 +113,51 @@ export function putScenarioVideo(httpBase: string, token: string, id: string, vi
 
 export function deleteScenarioVideo(httpBase: string, token: string, id: string) {
   return request<void>(`${httpBase}/scenarios/${id}/video`, { method: 'DELETE' }, token)
+}
+
+// Ubicación del incidente — docs/designs/ubicacion-del-incidente.md. `null` (no una excepción)
+// cuando el escenario no tiene ubicación configurada (404) — mismo patrón que
+// `getScenarioVideoAccess`: el gate de pre-llamada debe seguir directo al flujo de hoy, no
+// tratarlo como un error.
+export async function getScenarioLocationBrief(
+  httpBase: string,
+  token: string,
+  id: string,
+): Promise<ScenarioLocationAccess | null> {
+  try {
+    return await request<ScenarioLocationAccess>(`${httpBase}/scenarios/${id}/location/brief`, {}, token)
+  } catch {
+    return null
+  }
+}
+
+export async function getScenarioLocation(
+  httpBase: string,
+  token: string,
+  id: string,
+): Promise<ScenarioLocationDetail | null> {
+  try {
+    return await request<ScenarioLocationDetail>(`${httpBase}/scenarios/${id}/location`, {}, token)
+  } catch {
+    return null
+  }
+}
+
+export function putScenarioLocation(
+  httpBase: string,
+  token: string,
+  id: string,
+  location: ScenarioLocationInput,
+) {
+  return request<ScenarioLocationDetail>(
+    `${httpBase}/scenarios/${id}/location`,
+    { method: 'PUT', body: JSON.stringify(location) },
+    token,
+  )
+}
+
+export function deleteScenarioLocation(httpBase: string, token: string, id: string) {
+  return request<void>(`${httpBase}/scenarios/${id}/location`, { method: 'DELETE' }, token)
 }
 
 // ADR-0012 — sube el archivo real en vez de pedir una ruta ya colocada en el disco del

@@ -1,6 +1,10 @@
-import { AlertCircle, CheckCircle2, Languages, MessageSquareText, Mic, Timer } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Languages, MapPin, MessageSquareText, Mic, Timer } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { getScenarioLocationBrief, httpBaseFrom } from '../lib/api'
+import { useEngineStore } from '../stores/engineStore'
+import LocationMiniMap from './LocationMiniMap'
 import ScoreRing from './ScoreRing'
-import type { CoachingRating, CommunicationCoaching, TrainingSession } from '../types'
+import type { CoachingRating, CommunicationCoaching, ScenarioLocationAccess, TrainingSession } from '../types'
 
 // Extraído de `ReviewPage` (roadmap Fase 2: "puntaje compuesto, desglose, y narrativa de
 // debrief" + historial con posible "replay"). Es el mismo componente en las dos pantallas a
@@ -10,6 +14,24 @@ import type { CoachingRating, CommunicationCoaching, TrainingSession } from '../
 // esta arquitectura — ver NFR-07, cumplimiento regulatorio de grabación de voz, sin resolver).
 export default function SessionBreakdown({ session }: { session: TrainingSession }) {
   const evaluation = session.evaluation
+  const { bridgeUrl, authToken } = useEngineStore()
+  const [locationBrief, setLocationBrief] = useState<ScenarioLocationAccess | null>(null)
+
+  // Ubicación del incidente (docs/designs/ubicacion-del-incidente.md, Fase 2 Pass 1/F2, F17) —
+  // el desglose por campo YA aparece gratis abajo en "Information Collected" (mismos arrays
+  // `collected`/`missing` genéricos que cualquier CriticalDataPoint, cero cambios de render para
+  // eso). El mini-mapa es la única pieza nueva de UI: aporta información real ahora que dibuja
+  // geometría (F17), resaltando en verde/gris lo que el trainee mencionó — se omite en silencio
+  // (nunca un mapa vacío) si el escenario no tiene ubicación configurada.
+  useEffect(() => {
+    if (!authToken || !session.scenario_id) return
+    let cancelled = false
+    getScenarioLocationBrief(httpBaseFrom(bridgeUrl), authToken, session.scenario_id).then((brief) => {
+      if (!cancelled) setLocationBrief(brief)
+    })
+    return () => { cancelled = true }
+  }, [session.scenario_id, authToken, bridgeUrl])
+
   if (!evaluation) {
     return (
       <div className="panel session-interrupted-card">
@@ -43,6 +65,22 @@ export default function SessionBreakdown({ session }: { session: TrainingSession
       </section>
       <section className="panel review-details">
         <h3>Information Collected</h3>
+        {locationBrief && (
+          <div className="location-review-overlay">
+            <p className="location-review-heading"><MapPin size={14} />Location</p>
+            <LocationMiniMap
+              mode="review"
+              value={{
+                street: locationBrief.street,
+                crossStreet: locationBrief.cross_street,
+                landmark: locationBrief.landmark,
+                markerX: locationBrief.marker_x,
+                markerY: locationBrief.marker_y,
+              }}
+              collectedLabels={evaluation.collected}
+            />
+          </div>
+        )}
         {evaluation.collected.map((item) => <p className="check-line ok" key={item}><CheckCircle2 size={17} />{item}</p>)}
         {evaluation.missing.map((item) => <p className="check-line bad" key={item}><AlertCircle size={17} />Missing: {item}</p>)}
       </section>

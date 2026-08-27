@@ -3,10 +3,12 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import Header from '../components/Header'
+import InCallLocationPanel from '../components/InCallLocationPanel'
 import InCallVideoPanel from '../components/InCallVideoPanel'
+import PreCallLocationBriefing from '../components/PreCallLocationBriefing'
 import PreCallVideoGate from '../components/PreCallVideoGate'
 import Waveform from '../components/Waveform'
-import { httpBaseFrom } from '../lib/api'
+import { getScenario, httpBaseFrom } from '../lib/api'
 import { useEngineStore } from '../stores/engineStore'
 
 export default function CallPage() {
@@ -16,20 +18,27 @@ export default function CallPage() {
     connection, callStatus, dispatcherSpeaking, operatorSpeaking, recording,
     activeScenario, transcript, lastSession, error, warning, engineActivity,
     toggleRecording, pause, resume, endCall, clearNotice,
-    scenarios, selectedScenarioId, bridgeUrl, videoAccess, videoAccessLoading,
+    scenarios, selectedScenarioId, bridgeUrl, authToken, videoAccess, videoAccessLoading,
     loadVideoAccess, notifyVideoEnded, clearVideoAccess, startCall,
+    locationBrief, locationBriefLoading, loadLocationBrief, clearLocationBrief,
   } = useEngineStore()
+  const [locationBriefingText, setLocationBriefingText] = useState('')
 
-  // Escenarios de video (docs/designs/escenarios-de-video.md): un solo lugar decide cuándo se
-  // manda `call.start` — ni HomePage.tsx ni ScenariosPage.tsx lo hacen más (hallazgo de diseño
-  // #1). `gateResolved` es "ya sabemos si hay video que mostrar, o no" — antes de saberlo no se
-  // manda `call.start` ni se muestra nada, para no parpadear entre estados. `gateDismissed` es
-  // distinto de "videoAccess dejó de existir" — el store SIGUE con el `videoAccess` de esta
-  // sesión durante toda la llamada a propósito (pedido explícito del usuario: poder re-ver el
-  // video durante la simulación, ver InCallVideoPanel.tsx), solo deja de mostrarse pantalla
-  // completa una vez que el entrenando confirma "Start Call" en el interstitial.
+  // Escenarios de video (docs/designs/escenarios-de-video.md) + ubicación del incidente
+  // (docs/designs/ubicacion-del-incidente.md): un solo lugar decide cuándo se manda
+  // `call.start` — ni HomePage.tsx ni ScenariosPage.tsx lo hacen más (hallazgo de diseño #1).
+  // `gateResolved` es "ya sabemos qué gates hay que mostrar, o ninguno" — antes de saberlo no se
+  // manda `call.start` ni se muestra nada, para no parpadear entre estados. Los dos fetches
+  // corren en PARALELO (`Promise.all`, hallazgo F14/B11 de las revisiones de diseño/ingeniería:
+  // secuenciarlos duplicaría la latencia de pre-llamada sin necesidad). Orden de la secuencia,
+  // decidido en Fase 2 Pass 7: ubicación (contexto de la escena) primero, video (evidencia del
+  // incidente) segundo — cada `*GateDismissed` es distinto de "el dato dejó de existir": el
+  // store SIGUE con `videoAccess`/`locationBrief` de esta sesión durante toda la llamada a
+  // propósito (acceso opt-in en vivo, ver InCallVideoPanel.tsx/InCallLocationPanel.tsx), solo
+  // dejan de mostrarse pantalla completa una vez que el entrenando continúa.
   const [gateResolved, setGateResolved] = useState(false)
-  const [gateDismissed, setGateDismissed] = useState(false)
+  const [locationGateDismissed, setLocationGateDismissed] = useState(false)
+  const [videoGateDismissed, setVideoGateDismissed] = useState(false)
   const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId)
 
   useEffect(() => {
@@ -41,22 +50,38 @@ export default function CallPage() {
 
     let cancelled = false
     ;(async () => {
-      let access = null
-      if (selectedScenario?.has_video) {
-        access = await loadVideoAccess(selectedScenarioId)
-      } else {
-        // Sin esto, un `videoAccess` de la llamada ANTERIOR (se mantiene en el store a
-        // propósito durante toda una llamada, ver comentario de arriba) se filtraría al panel
-        // en vivo de este escenario nuevo, que no tiene video.
-        clearVideoAccess()
-      }
+      const fetchLocation = selectedScenario?.has_location
+        ? loadLocationBrief(selectedScenarioId)
+        : Promise.resolve(clearLocationBrief()).then(() => null)
+      const fetchVideo = selectedScenario?.has_video
+        ? loadVideoAccess(selectedScenarioId)
+        : Promise.resolve(clearVideoAccess()).then(() => null)
+      // Cherry-pick de bajo costo del design doc (Fase 1 0D #2) — el briefing completo solo
+      // hace falta cuando el gate de ubicación se va a mostrar; en paralelo con los otros dos
+      // fetches, nunca los bloquea (si falla, el gate igual se muestra sin briefing, ver
+      // PreCallLocationBriefing.tsx: la sección es opcional).
+      const fetchBriefing = selectedScenario?.has_location && authToken
+        ? getScenario(httpBaseFrom(bridgeUrl), authToken, selectedScenarioId).then((s) => s.briefing).catch(() => '')
+        : Promise.resolve('')
+      const [locationResult, videoResult, briefingResult] = await Promise.all([fetchLocation, fetchVideo, fetchBriefing])
       if (cancelled) return
+      setLocationBriefingText(briefingResult)
       setGateResolved(true)
-      if (!access) startCall()  // hallazgo de diseño #2: sin video, seguir directo al flujo de hoy
+      // Ni ubicación ni video que mostrar — seguir directo al flujo de hoy, sin cambio de
+      // comportamiento para escenarios sin ninguno de los dos configurados.
+      if (!locationResult && !videoResult) startCall()
     })()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedScenarioId])
+
+  // Único punto de disparo de `call.start` desde el gate de ubicación — la ÚNICA condición
+  // terminal es "no queda ningún gate de video pendiente", nunca un doble-fire: si hay video,
+  // el gate de video es quien manda `call.start` a continuación (ver su propio onStartCall).
+  const continueFromLocationGate = () => {
+    setLocationGateDismissed(true)
+    if (!videoAccess) startCall()
+  }
 
   useEffect(() => {
     if (callStatus !== 'connected') return
@@ -68,18 +93,30 @@ export default function CallPage() {
     if (lastSession?.status === 'completed') navigate('/review')
   }, [lastSession, navigate])
 
-  if (videoAccess && !gateDismissed) {
+  if (locationBrief && !locationGateDismissed) {
+    return (
+      <PreCallLocationBriefing
+        scenarioTitle={selectedScenario?.title ?? 'Training Session'}
+        location={locationBrief}
+        briefing={locationBriefingText}
+        isLastStep={!videoAccess}
+        onContinue={continueFromLocationGate}
+      />
+    )
+  }
+
+  if (videoAccess && !videoGateDismissed) {
     return (
       <PreCallVideoGate
         scenarioTitle={selectedScenario?.title ?? 'Training Session'}
         streamUrl={`${httpBaseFrom(bridgeUrl)}${videoAccess.stream_url}`}
         onVideoEnded={() => notifyVideoEnded(selectedScenarioId)}
-        onStartCall={() => { setGateDismissed(true); startCall() }}
+        onStartCall={() => { setVideoGateDismissed(true); startCall() }}
       />
     )
   }
 
-  if (!gateResolved || videoAccessLoading) {
+  if (!gateResolved || videoAccessLoading || locationBriefLoading) {
     // Sin precedente de loading-state para media en este código (hallazgo de diseño #3) — un
     // spinner real sobre el mismo layout de siempre, nunca una pantalla en blanco que se lea
     // como colgada.
@@ -138,6 +175,9 @@ export default function CallPage() {
           antes. Cerrado por default a propósito (ver InCallVideoPanel.tsx) — el entrenando lo
           abre si lo necesita, no se le pone en pantalla sin pedirlo. */}
       {videoAccess && <InCallVideoPanel streamUrl={`${httpBaseFrom(bridgeUrl)}${videoAccess.stream_url}`} />}
+      {/* Mismo patrón, mismo razonamiento — ubicación del incidente (F12, corrección de la voz
+          de diseño independiente sobre el design doc). */}
+      {locationBrief && <InCallLocationPanel location={locationBrief} />}
     </div>
   )
 }
