@@ -94,7 +94,7 @@ class ClaudeScenarioDrafter(ScenarioDraftingPort):
             try:
                 response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=1024,
+                    max_tokens=2048,
                     system=_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_prompt}],
                 )
@@ -106,9 +106,12 @@ class ClaudeScenarioDrafter(ScenarioDraftingPort):
                 if attempt < self.max_retries:
                     time.sleep(self.retry_delay_seconds * (attempt + 1))
 
-            except (json.JSONDecodeError, KeyError, ValueError) as error:
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as error:
                 # Malformado/incompleto no es transitorio de red — no vale la pena reintentar con
-                # el mismo prompt (mismo criterio que `ClaudeMetricsJudge._parse`).
+                # el mismo prompt (mismo criterio que `ClaudeMetricsJudge._parse`). `TypeError`
+                # cubre un JSON bien formado pero con la forma equivocada (p.ej.
+                # `critical_data_points` como string en vez de lista de objetos), que revienta en
+                # `point["key"]` más abajo en `_parse`.
                 raise ScenarioDraftingError(
                     f"Drafter returned an unparseable response: {error}"
                 ) from error

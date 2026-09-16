@@ -1024,6 +1024,16 @@ def create_app(
         if draft.status != "pending":
             raise HTTPException(status_code=409, detail=f"draft is already {draft.status}")
 
+        # Re-chequeo deliberado: el incidente pudo promoverse por otro camino (el endpoint viejo
+        # `promote-to-scenario`) entre la creación de este borrador y su aprobación — sin este
+        # chequeo, `mark_promoted` de más abajo pisaría en silencio ese `promoted_scenario_id` y
+        # dejaría un escenario huérfano en la librería (ver ADR-0014). Si el incidente ya no
+        # existe, se deja aprobar el borrador igual — mismo criterio conservador que el resto de
+        # este endpoint, que no falla duro por el estado propio del incidente.
+        incident = incident_store.get(draft.incident_id)
+        if incident is not None and incident.promoted_scenario_id:
+            raise HTTPException(status_code=409, detail="incident was already promoted to a scenario")
+
         scenario = Scenario(
             id="",
             title=draft.title,

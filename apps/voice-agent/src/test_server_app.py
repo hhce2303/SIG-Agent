@@ -867,6 +867,123 @@ def test_approve_scenario_draft_creates_scenario_and_promotes_incident(app_compo
     assert again.status_code == 409
 
 
+def test_approve_scenario_draft_returns_409_when_incident_was_promoted_via_legacy_endpoint(
+    app_components, tmp_path
+):
+    """Revisión final de rama, Finding 1 (Crítico): `approve_scenario_draft` no re-chequeaba
+    `incident.promoted_scenario_id` antes de `mark_promoted`. Secuencia real y reproducible sin
+    concurrencia: 1) se pide un borrador (incidente sin promover todavía, así que
+    `draft_scenario_from_incident` no lo bloquea); 2) el endpoint viejo
+    `promote-to-scenario` promueve el MISMO incidente por otro camino; 3) aprobar el borrador
+    pendiente debe fallar con 409 en vez de pisar en silencio `promoted_scenario_id` y crear un
+    segundo escenario huérfano. Esto también cierra el hallazgo diferido de la Task 3 ("no hay
+    test dedicado para el branch 409-por-incidente-ya-promovido") — cubre tanto el guard en
+    `draft_scenario_from_incident` (paso 1 ya no aplica porque el incidente se promueve DESPUÉS
+    del draft) como el guard nuevo en `approve_scenario_draft` (paso 3)."""
+
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    supervisor_token = _login(client).json()["token"]
+    supervisor_headers = {"Authorization": f"Bearer {supervisor_token}"}
+
+    # 1) Incidente sin promover -> pedir un borrador es válido.
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=supervisor_headers).json()["id"]
+    draft_id = client.post(
+        f"/incidents/{incident_id}/draft-scenario", headers=supervisor_headers
+    ).json()["id"]
+
+    # 2) El mismo incidente se promueve por el camino viejo, sin pasar por el borrador.
+    legacy_promotion = client.post(
+        f"/incidents/{incident_id}/promote-to-scenario", headers=supervisor_headers
+    )
+    assert legacy_promotion.status_code == 201
+    legacy_scenario_id = legacy_promotion.json()["id"]
+
+    incident = client.get("/incidents", headers=supervisor_headers).json()[0]
+    assert incident["promoted_scenario_id"] == legacy_scenario_id
+
+    # 3) El borrador sigue "pending" (el chequeo viejo de `draft.status` no detecta esto) — la
+    # aprobación debe fallar en vez de sobreescribir `promoted_scenario_id` en silencio.
+    manager_token = _login(client, supervisor_id="mgr-1", passphrase=MANAGER_PASSPHRASE).json()["token"]
+    manager_headers = {"Authorization": f"Bearer {manager_token}"}
+
+    approved = client.post(f"/scenario-drafts/{draft_id}/approve", headers=manager_headers)
+    assert approved.status_code == 409
+
+    # El escenario legado sigue siendo el único vinculado al incidente — nada se pisó.
+    incident = client.get("/incidents", headers=supervisor_headers).json()[0]
+    assert incident["promoted_scenario_id"] == legacy_scenario_id
+
+    # El borrador se queda "pending" — no quedó a medio aprobar.
+    draft = client.get(f"/scenario-drafts/{draft_id}", headers=supervisor_headers).json()
+    assert draft["status"] == "pending"
+
+
+class FailingScenarioStore:
+    """Doble de `ScenarioPort` cuyo `create` siempre falla — Finding 3 de la revisión final de
+    rama (ADR-0014, "publicación atómica"): antes de este fix, esa palabra no tenía ningún test
+    que forzara el fallo real de `scenario_store.create` dentro de `approve_scenario_draft`. El
+    orden de las tres llamadas (`scenario_store.create` -> `mark_approved` -> `mark_promoted`)
+    hace que un fallo en la primera deje tanto el borrador como el incidente sin cambios; este
+    stub nunca necesita implementar `list`/`get`/`update`/`delete` porque el flujo bajo prueba no
+    llega a usarlos antes de que `create` reviente."""
+
+    def create(self, scenario):
+        raise RuntimeError("scenario store unavailable")
+
+
+def test_approve_scenario_draft_leaves_draft_pending_and_incident_unpromoted_when_scenario_store_create_fails(
+    app_components, tmp_path
+):
+    from persistence.sqlite_scenario_draft_store import SQLiteScenarioDraftStore
+
+    # `app_components` desempaqueta (token_issuer, session_store, scenario_store, settings_store,
+    # incident_store) — se reconstruye acá con el `scenario_store` real reemplazado por
+    # `FailingScenarioStore()`, en vez de usar `_make_client_with_drafting` (que siempre pasa el
+    # `scenario_store` real de `app_components`).
+    token_issuer, session_store, _real_scenario_store, settings_store, incident_store = app_components
+
+    app = create_app(
+        token_issuer=token_issuer,
+        session_store=session_store,
+        scenario_store=FailingScenarioStore(),
+        settings_store=settings_store,
+        incident_store=incident_store,
+        supervisor_passphrase=PASSPHRASE,
+        manager_passphrase=MANAGER_PASSPHRASE,
+        dispatcher=StubDispatcher(["911, what is your emergency?"]),
+        stt=StubSTT([""]),
+        tts=StubTTS(),
+        microphone=StubMicrophone(),
+        clock=make_clock(),
+        scenario_draft_store=SQLiteScenarioDraftStore(str(tmp_path / "scenario_drafts.db")),
+        scenario_drafting=StubScenarioDrafter(),
+    )
+    client = TestClient(app)
+
+    supervisor_token = _login(client).json()["token"]
+    supervisor_headers = {"Authorization": f"Bearer {supervisor_token}"}
+
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=supervisor_headers).json()["id"]
+    draft_id = client.post(
+        f"/incidents/{incident_id}/draft-scenario", headers=supervisor_headers
+    ).json()["id"]
+
+    manager_token = _login(client, supervisor_id="mgr-1", passphrase=MANAGER_PASSPHRASE).json()["token"]
+    manager_headers = {"Authorization": f"Bearer {manager_token}"}
+
+    # `scenario_store.create` revienta sin ser atrapado por `approve_scenario_draft` (a propósito
+    # — no hay try/except ahí, ver ADR-0014): el `TestClient` por default re-levanta la excepción
+    # del servidor en vez de devolver un 500, así que se espera acá con `pytest.raises`.
+    with pytest.raises(RuntimeError):
+        client.post(f"/scenario-drafts/{draft_id}/approve", headers=manager_headers)
+
+    draft = client.get(f"/scenario-drafts/{draft_id}", headers=supervisor_headers).json()
+    assert draft["status"] == "pending"
+
+    incident = client.get("/incidents", headers=supervisor_headers).json()[0]
+    assert incident["promoted_scenario_id"] == ""
+
+
 def test_reject_scenario_draft_leaves_incident_unpromoted(app_components, tmp_path):
     client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
     supervisor_token = _login(client).json()["token"]

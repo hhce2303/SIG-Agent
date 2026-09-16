@@ -122,6 +122,47 @@ def test_draft_raises_scenario_drafting_error_on_unexpected_difficulty(drafter):
         drafter.draft(_incident())
 
 
+def test_draft_raises_scenario_drafting_error_on_wrong_shaped_critical_data_points(drafter):
+    # JSON bien formado pero con la forma equivocada: `critical_data_points` es un string, no una
+    # lista de objetos. `_parse` termina haciendo `point["key"]` sobre un caracter individual del
+    # string, lo que revienta con `TypeError` — debe traducirse a `ScenarioDraftingError`, no
+    # propagar como 500 sin manejar.
+    bad_json = """{
+  "title": "Vehicle Theft \\u2014 Dealership Lot",
+  "category": "Vehicle Theft",
+  "difficulty": "Medium",
+  "language": "English",
+  "description": "A caller reports a stolen vehicle from the dealership lot.",
+  "briefing": "A caller reports a stolen 2021 Toyota Camry from the dealership lot.",
+  "critical_data_points": "none",
+  "missing_information": ["exact time of the theft was not in the notes"]
+}"""
+    drafter.client.messages.create.return_value = _response(bad_json)
+
+    with pytest.raises(ScenarioDraftingError):
+        drafter.draft(_incident())
+
+
+def test_draft_raises_scenario_drafting_error_on_missing_required_key(drafter):
+    # JSON válido pero sin la key "title" — `_parse` hace `payload["title"]` y revienta con
+    # `KeyError`, que ya estaba en el tuple de excepciones capturadas pero sin test dedicado.
+    bad_json = """{
+  "category": "Vehicle Theft",
+  "difficulty": "Medium",
+  "language": "English",
+  "description": "A caller reports a stolen vehicle from the dealership lot.",
+  "briefing": "A caller reports a stolen 2021 Toyota Camry from the dealership lot.",
+  "critical_data_points": [
+    {"key": "vehicle_description", "label": "Vehicle description", "match_hints": ["camry", "toyota"]}
+  ],
+  "missing_information": ["exact time of the theft was not in the notes"]
+}"""
+    drafter.client.messages.create.return_value = _response(bad_json)
+
+    with pytest.raises(ScenarioDraftingError):
+        drafter.draft(_incident())
+
+
 def test_draft_prompt_instructs_not_inventing_real_identifiers(drafter):
     drafter.client.messages.create.return_value = _response(_VALID_JSON)
 

@@ -240,6 +240,7 @@ múltiples PCs posibles, no sesiones simultáneas.
 | [0011](./adr/0011-gate-de-rol-minimo-video-de-incidentes.md) | Gate de rol mínimo para video de incidentes | accepted |
 | [0012](./adr/0012-upload-real-de-video-de-escenarios.md) | Upload real de video de escenarios | accepted |
 | [0013](./adr/0013-instalador-unificado-monomaquina.md) | Instalador Windows unificado para el perfil monomáquina actual | accepted |
+| [0014](./adr/0014-redaccion-asistida-incidente-a-escenario.md) | Redacción de escenarios asistida por Claude a partir de incidentes, con aprobación humana | accepted |
 
 ## 10. Requisitos de calidad
 
