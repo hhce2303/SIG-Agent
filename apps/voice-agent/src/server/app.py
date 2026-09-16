@@ -290,6 +290,16 @@ class ScenarioDraftOut(BaseModel):
     updated_at: float
 
 
+class ScenarioDraftPatchIn(BaseModel):
+    title: str
+    category: str
+    difficulty: str
+    language: str = "English"
+    description: str
+    briefing: str
+    critical_data_points: list[CriticalDataPointModel] = Field(default_factory=list)
+
+
 class GroupStatsModel(BaseModel):
     sample_size: int
     avg_outcome_rating: float | None = None
@@ -974,6 +984,77 @@ def create_app(
         if draft is None:
             raise HTTPException(status_code=404, detail="scenario draft not found")
         return _draft_out(draft)
+
+    @app.put("/scenario-drafts/{draft_id}", response_model=ScenarioDraftOut)
+    def update_scenario_draft(
+        draft_id: str, body: ScenarioDraftPatchIn, claims: SessionTokenClaims = Depends(_bearer_claims)
+    ):
+        _require_scenario_drafting_feature()
+        draft = scenario_draft_store.get(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="scenario draft not found")
+        if draft.status != "pending":
+            raise HTTPException(status_code=409, detail=f"draft is already {draft.status}, cannot edit")
+
+        draft.title = body.title
+        draft.category = body.category
+        draft.difficulty = body.difficulty
+        draft.language = body.language
+        draft.description = body.description
+        draft.briefing = body.briefing
+        draft.critical_data_points = [
+            CriticalDataPoint(key=p.key, label=p.label, required=p.required, match_hints=p.match_hints)
+            for p in body.critical_data_points
+        ]
+        scenario_draft_store.update(draft)
+
+        log_event(logger, "scenario_draft_edited", supervisor_id=claims.supervisor_id, draft_id=draft_id)
+        return _draft_out(draft)
+
+    @app.post("/scenario-drafts/{draft_id}/approve", response_model=ScenarioOut, status_code=201)
+    def approve_scenario_draft(draft_id: str, claims: SessionTokenClaims = Depends(_require_manager)):
+        """Publicación atómica (ADR-0014): crea el `Scenario` real, marca el borrador `approved`
+        y el incidente promovido, en ese orden — si `scenario_store.create` falla, ni el borrador
+        ni el incidente cambian de estado."""
+
+        _require_scenario_drafting_feature()
+        draft = scenario_draft_store.get(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="scenario draft not found")
+        if draft.status != "pending":
+            raise HTTPException(status_code=409, detail=f"draft is already {draft.status}")
+
+        scenario = Scenario(
+            id="",
+            title=draft.title,
+            category=draft.category,
+            difficulty=draft.difficulty,
+            language=draft.language,
+            description=draft.description,
+            briefing=draft.briefing,
+            critical_data_points=draft.critical_data_points,
+        )
+        scenario_store.create(scenario)
+        scenario_draft_store.mark_approved(draft.id, scenario.id)
+        incident_store.mark_promoted(draft.incident_id, scenario.id)
+
+        log_event(
+            logger, "scenario_draft_approved", supervisor_id=claims.supervisor_id,
+            draft_id=draft.id, scenario_id=scenario.id,
+        )
+        return _scenario_out(scenario, scenario_video_store, scenario_location_store)
+
+    @app.post("/scenario-drafts/{draft_id}/reject", status_code=204)
+    def reject_scenario_draft(draft_id: str, claims: SessionTokenClaims = Depends(_require_manager)):
+        _require_scenario_drafting_feature()
+        draft = scenario_draft_store.get(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="scenario draft not found")
+        if draft.status != "pending":
+            raise HTTPException(status_code=409, detail=f"draft is already {draft.status}")
+
+        scenario_draft_store.mark_rejected(draft.id)
+        log_event(logger, "scenario_draft_rejected", supervisor_id=claims.supervisor_id, draft_id=draft.id)
 
     @app.get("/impact-report", response_model=ImpactReportModel)
     def get_impact_report(claims: SessionTokenClaims = Depends(_bearer_claims)):

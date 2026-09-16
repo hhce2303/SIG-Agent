@@ -689,6 +689,9 @@ class StubScenarioDrafter:
         )
 
 
+MANAGER_PASSPHRASE = "manager-passphrase"
+
+
 def _make_client_with_drafting(app_components, scenario_drafting, tmp_path):
     from persistence.sqlite_scenario_draft_store import SQLiteScenarioDraftStore
 
@@ -700,6 +703,7 @@ def _make_client_with_drafting(app_components, scenario_drafting, tmp_path):
         settings_store=settings_store,
         incident_store=incident_store,
         supervisor_passphrase=PASSPHRASE,
+        manager_passphrase=MANAGER_PASSPHRASE,
         dispatcher=StubDispatcher(["911, what is your emergency?"]),
         stt=StubSTT([""]),
         tts=StubTTS(),
@@ -786,6 +790,108 @@ def test_get_scenario_draft_returns_404_for_unknown_id(app_components, tmp_path)
 
     response = client.get("/scenario-drafts/does-not-exist", headers=headers)
     assert response.status_code == 404
+
+
+def _draft_patch_payload(**overrides):
+    payload = {
+        "title": "Edited Vehicle Theft",
+        "category": "Vehicle Theft",
+        "difficulty": "Hard",
+        "language": "English",
+        "description": "A caller reports a stolen vehicle from the dealership lot.",
+        "briefing": "A caller reports a stolen 2021 Toyota Camry, edited by a reviewer.",
+        "critical_data_points": [
+            {"key": "vehicle_description", "label": "Vehicle description", "match_hints": ["camry", "toyota"]},
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_update_pending_draft_persists_edits(app_components, tmp_path):
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=headers).json()["id"]
+    draft_id = client.post(f"/incidents/{incident_id}/draft-scenario", headers=headers).json()["id"]
+
+    response = client.put(f"/scenario-drafts/{draft_id}", json=_draft_patch_payload(), headers=headers)
+    assert response.status_code == 200
+    assert response.json()["title"] == "Edited Vehicle Theft"
+    assert response.json()["difficulty"] == "Hard"
+
+
+def test_approve_scenario_draft_requires_manager_role(app_components, tmp_path):
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=headers).json()["id"]
+    draft_id = client.post(f"/incidents/{incident_id}/draft-scenario", headers=headers).json()["id"]
+
+    response = client.post(f"/scenario-drafts/{draft_id}/approve", headers=headers)
+    assert response.status_code == 403
+
+
+def test_approve_scenario_draft_creates_scenario_and_promotes_incident(app_components, tmp_path):
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    supervisor_token = _login(client).json()["token"]
+    supervisor_headers = {"Authorization": f"Bearer {supervisor_token}"}
+
+    incident_id = client.post(
+        "/incidents", json=_incident_payload(), headers=supervisor_headers
+    ).json()["id"]
+    draft_id = client.post(
+        f"/incidents/{incident_id}/draft-scenario", headers=supervisor_headers
+    ).json()["id"]
+
+    manager_token = _login(client, supervisor_id="mgr-1", passphrase=MANAGER_PASSPHRASE).json()["token"]
+    manager_headers = {"Authorization": f"Bearer {manager_token}"}
+
+    approved = client.post(f"/scenario-drafts/{draft_id}/approve", headers=manager_headers)
+    assert approved.status_code == 201
+    scenario = approved.json()
+    assert scenario["title"] == "Vehicle Theft — Dealership Lot"
+    assert scenario["critical_data_points"][0]["key"] == "vehicle_description"
+
+    draft = client.get(f"/scenario-drafts/{draft_id}", headers=supervisor_headers).json()
+    assert draft["status"] == "approved"
+    assert draft["approved_scenario_id"] == scenario["id"]
+
+    incident = client.get("/incidents", headers=supervisor_headers).json()[0]
+    assert incident["promoted_scenario_id"] == scenario["id"]
+
+    # aprobar un borrador ya aprobado sería un duplicado silencioso en la librería de escenarios.
+    again = client.post(f"/scenario-drafts/{draft_id}/approve", headers=manager_headers)
+    assert again.status_code == 409
+
+
+def test_reject_scenario_draft_leaves_incident_unpromoted(app_components, tmp_path):
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    supervisor_token = _login(client).json()["token"]
+    supervisor_headers = {"Authorization": f"Bearer {supervisor_token}"}
+
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=supervisor_headers).json()["id"]
+    draft_id = client.post(
+        f"/incidents/{incident_id}/draft-scenario", headers=supervisor_headers
+    ).json()["id"]
+
+    manager_token = _login(client, supervisor_id="mgr-1", passphrase=MANAGER_PASSPHRASE).json()["token"]
+    manager_headers = {"Authorization": f"Bearer {manager_token}"}
+
+    rejected = client.post(f"/scenario-drafts/{draft_id}/reject", headers=manager_headers)
+    assert rejected.status_code == 204
+
+    draft = client.get(f"/scenario-drafts/{draft_id}", headers=supervisor_headers).json()
+    assert draft["status"] == "rejected"
+
+    incident = client.get("/incidents", headers=supervisor_headers).json()[0]
+    assert incident["promoted_scenario_id"] == ""
+
+    # un incidente con un borrador rechazado puede pedir un borrador nuevo.
+    retried = client.post(f"/incidents/{incident_id}/draft-scenario", headers=supervisor_headers)
+    assert retried.status_code == 201
 
 
 def test_impact_report_is_inconclusive_below_the_minimum_sample_size(client):
