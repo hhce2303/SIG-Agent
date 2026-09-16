@@ -32,6 +32,11 @@ Opcionales:
   `0` apaga el juez LLM de coherencia/calidad de inglés post-llamada sin revertir el resto del
   plan (latencia de turno y confianza de transcripción siguen activas — son puras, bajo riesgo).
   Reusa `ANTHROPIC_API_KEY`/`CLAUDE_MODEL`, las mismas credenciales que ya usa el dispatcher.
+- `SCENARIO_DRAFTING_ENABLED` (default `1`) — redacción de borradores de escenario asistida por
+  Claude a partir de incidentes reales (ADR-0014): `0` apaga `POST /incidents/{id}/draft-scenario`
+  y las rutas de `/scenario-drafts` (503) sin afectar el resto del servidor. Reusa
+  `ANTHROPIC_API_KEY`/`CLAUDE_MODEL`, las mismas credenciales que ya usan `ClaudeDispatcher` y
+  `ClaudeMetricsJudge`.
 - `WHISPER_MODEL_PATH` / `KOKORO_MODEL_DIR` (docs/designs/empaquetado-ejecutable-backend.md,
   Premisas 2-4) — rutas locales a pesos ya descargados (relativas a `bundle_dir()`, o absolutas),
   para correr sin acceso a internet en el ejecutable empaquetado. Sin configurar, caen al
@@ -57,8 +62,10 @@ from auth.video_token import HmacVideoTokenIssuer
 from core.observability import configure_logging
 from core.paths import base_dir, bundle_dir
 from llm.claude import ClaudeDispatcher
+from llm.claude_scenario_drafter import ClaudeScenarioDrafter
 from llm.metrics_judge import ClaudeMetricsJudge
 from persistence.sqlite_incident_store import SQLiteIncidentStore
+from persistence.sqlite_scenario_draft_store import SQLiteScenarioDraftStore
 from persistence.sqlite_scenario_store import SQLiteScenarioStore
 from persistence.sqlite_scenario_video_store import SQLiteScenarioVideoStore
 from persistence.sqlite_scenario_location_store import SQLiteScenarioLocationStore
@@ -208,6 +215,18 @@ def build_app():
         # docs/designs/ubicacion-del-incidente.md — mismo patrón que scenario_video_store: tabla
         # nueva, mismo archivo compartido.
         scenario_location_store=SQLiteScenarioLocationStore(sessions_db_path),
+        # ADR-0014: mismo patrón opt-out que `METRICS_JUDGE_ENABLED` — `SCENARIO_DRAFTING_ENABLED=0`
+        # apaga la redacción asistida sin afectar el resto del servidor. Reusa las mismas
+        # credenciales que ya usan `ClaudeDispatcher`/`ClaudeMetricsJudge`.
+        scenario_draft_store=SQLiteScenarioDraftStore(sessions_db_path),
+        scenario_drafting=(
+            ClaudeScenarioDrafter(
+                api_key=os.environ["ANTHROPIC_API_KEY"],
+                model=os.environ["CLAUDE_MODEL"],
+            )
+            if os.getenv("SCENARIO_DRAFTING_ENABLED", "1") == "1"
+            else None
+        ),
     )
 
 
