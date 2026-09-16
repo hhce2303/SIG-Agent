@@ -515,3 +515,85 @@ class IncidentOutcomePort(Protocol):
 
     def mark_promoted(self, incident_id: str, scenario_id: str) -> None:
         ...
+
+
+# ---------------------------------------------------------------------------
+# Borradores de escenario asistidos por Claude — ver ADR-0014. Extiende el lazo de
+# retroalimentación de `IncidentOutcome` (arriba): en vez de crear un `Scenario` vacío de
+# `critical_data_points` directamente, Claude propone un borrador completo que un humano revisa y
+# aprueba antes de publicarlo. `ScenarioDraftContent` es la salida efímera del LLM (mismo rol que
+# `MetricsJudgment` para `MetricsJudgePort` — no se guarda tal cual, se copia a `ScenarioDraft`
+# antes de persistir). `ScenarioDraft` es el registro con estado de aprobación.
+# ---------------------------------------------------------------------------
+
+
+class ScenarioDraftingError(Exception):
+    """El adaptador de LLM no pudo producir un borrador válido (timeout, rate-limit, JSON
+    malformado, faltan keys esperadas, fallo de auth). El endpoint la captura y no crea ni
+    modifica ningún borrador ni incidente — ver ADR-0014, "publicación atómica".
+    """
+
+
+@dataclass(frozen=True)
+class ScenarioDraftContent:
+    title: str
+    category: str
+    difficulty: str
+    language: str
+    description: str
+    briefing: str
+    critical_data_points: list[CriticalDataPoint]
+    missing_information: list[str]
+    raw_response: str
+
+
+@runtime_checkable
+class ScenarioDraftingPort(Protocol):
+    def draft(self, incident: IncidentOutcome) -> ScenarioDraftContent:
+        ...
+
+
+@dataclass
+class ScenarioDraft:
+    """Borrador editable, nunca usable en una llamada de entrenamiento hasta que
+    `status == "approved"` (ver `ScenarioDraftStorePort.mark_approved`, `server/app.py`)."""
+
+    id: str
+    incident_id: str
+    status: str  # "pending" | "approved" | "rejected"
+    title: str
+    category: str
+    difficulty: str
+    language: str
+    description: str
+    briefing: str
+    critical_data_points: list[CriticalDataPoint] = field(default_factory=list)
+    missing_information: list[str] = field(default_factory=list)
+    raw_response: str = ""
+    approved_scenario_id: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
+@runtime_checkable
+class ScenarioDraftStorePort(Protocol):
+    def create(self, draft: ScenarioDraft) -> None:
+        ...
+
+    def get(self, draft_id: str) -> ScenarioDraft | None:
+        ...
+
+    def get_pending_for_incident(self, incident_id: str) -> ScenarioDraft | None:
+        ...
+
+    def list(self) -> list[ScenarioDraft]:
+        ...
+
+    def update(self, draft: ScenarioDraft) -> None:
+        ...
+
+    def mark_approved(self, draft_id: str, scenario_id: str) -> None:
+        ...
+
+    def mark_rejected(self, draft_id: str) -> None:
+        ...
