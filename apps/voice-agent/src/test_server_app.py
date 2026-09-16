@@ -657,6 +657,137 @@ def test_promote_incident_creates_a_draft_scenario_from_the_post_mortem(client):
     assert again.status_code == 409
 
 
+class StubScenarioDrafter:
+    """Stub de `ScenarioDraftingPort` — ADR-0014. `error` inyecta una `ScenarioDraftingError`
+    para probar que un fallo de Claude no deja ningún borrador ni incidente a medio modificar."""
+
+    def __init__(self, content=None, error: Exception | None = None):
+        self._content = content
+        self._error = error
+        self.calls = 0
+
+    def draft(self, incident):
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        if self._content is not None:
+            return self._content
+
+        from core.ports import CriticalDataPoint, ScenarioDraftContent
+        return ScenarioDraftContent(
+            title="Vehicle Theft — Dealership Lot",
+            category="Vehicle Theft",
+            difficulty="Medium",
+            language="English",
+            description="A caller reports a stolen vehicle from the dealership lot.",
+            briefing="A caller reports a stolen 2021 Toyota Camry.",
+            critical_data_points=[
+                CriticalDataPoint(key="vehicle_description", label="Vehicle description", match_hints=["camry"]),
+            ],
+            missing_information=["exact time of the theft was not in the notes"],
+            raw_response="{}",
+        )
+
+
+def _make_client_with_drafting(app_components, scenario_drafting, tmp_path):
+    from persistence.sqlite_scenario_draft_store import SQLiteScenarioDraftStore
+
+    token_issuer, session_store, scenario_store, settings_store, incident_store = app_components
+    app = create_app(
+        token_issuer=token_issuer,
+        session_store=session_store,
+        scenario_store=scenario_store,
+        settings_store=settings_store,
+        incident_store=incident_store,
+        supervisor_passphrase=PASSPHRASE,
+        dispatcher=StubDispatcher(["911, what is your emergency?"]),
+        stt=StubSTT([""]),
+        tts=StubTTS(),
+        microphone=StubMicrophone(),
+        clock=make_clock(),
+        # NUNCA `SQLiteScenarioDraftStore(":memory:")`: el adaptador abre una conexión nueva por
+        # operación (mismo patrón que el resto de `persistence/`), y cada `sqlite3.connect(":memory:")`
+        # abre una base en blanco distinta — perdería todo lo escrito entre un `create()` y el
+        # siguiente `get()`. Un archivo real en `tmp_path` persiste entre conexiones.
+        scenario_draft_store=SQLiteScenarioDraftStore(str(tmp_path / "scenario_drafts.db")),
+        scenario_drafting=scenario_drafting,
+    )
+    return TestClient(app)
+
+
+def test_draft_scenario_endpoint_is_503_when_not_configured(client):
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=headers).json()["id"]
+
+    response = client.post(f"/incidents/{incident_id}/draft-scenario", headers=headers)
+    assert response.status_code == 503
+
+
+def test_draft_scenario_creates_a_pending_draft(app_components, tmp_path):
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    incident_id = client.post(
+        "/incidents", json=_incident_payload(notes="Caller described a stolen Camry."), headers=headers
+    ).json()["id"]
+
+    response = client.post(f"/incidents/{incident_id}/draft-scenario", headers=headers)
+    assert response.status_code == 201
+    draft = response.json()
+    assert draft["status"] == "pending"
+    assert draft["incident_id"] == incident_id
+    assert draft["critical_data_points"][0]["key"] == "vehicle_description"
+    assert draft["missing_information"] == ["exact time of the theft was not in the notes"]
+
+    # el incidente NO queda promovido solo por pedir un borrador — recién al aprobarlo (Task 4).
+    incident = client.get("/incidents", headers=headers).json()[0]
+    assert incident["promoted_scenario_id"] == ""
+
+
+def test_draft_scenario_rejects_a_second_pending_draft_for_the_same_incident(app_components, tmp_path):
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=headers).json()["id"]
+    client.post(f"/incidents/{incident_id}/draft-scenario", headers=headers)
+
+    again = client.post(f"/incidents/{incident_id}/draft-scenario", headers=headers)
+    assert again.status_code == 409
+
+
+def test_draft_scenario_leaves_nothing_changed_when_claude_fails(app_components, tmp_path):
+    from core.ports import ScenarioDraftingError
+
+    client = _make_client_with_drafting(
+        app_components, StubScenarioDrafter(error=ScenarioDraftingError("boom")), tmp_path
+    )
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    incident_id = client.post("/incidents", json=_incident_payload(), headers=headers).json()["id"]
+
+    response = client.post(f"/incidents/{incident_id}/draft-scenario", headers=headers)
+    assert response.status_code == 502
+
+    drafts = client.get("/scenario-drafts", headers=headers).json()
+    assert drafts == []
+    incident = client.get("/incidents", headers=headers).json()[0]
+    assert incident["promoted_scenario_id"] == ""
+
+
+def test_get_scenario_draft_returns_404_for_unknown_id(app_components, tmp_path):
+    client = _make_client_with_drafting(app_components, StubScenarioDrafter(), tmp_path)
+    token = _login(client).json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get("/scenario-drafts/does-not-exist", headers=headers)
+    assert response.status_code == 404
+
+
 def test_impact_report_is_inconclusive_below_the_minimum_sample_size(client):
     token = _login(client).json()["token"]
     headers = {"Authorization": f"Bearer {token}"}

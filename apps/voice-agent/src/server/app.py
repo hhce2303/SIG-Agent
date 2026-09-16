@@ -43,6 +43,10 @@ from core.ports import (
     MicrophonePort,
     PersistencePort,
     Scenario,
+    ScenarioDraft,
+    ScenarioDraftingError,
+    ScenarioDraftingPort,
+    ScenarioDraftStorePort,
     ScenarioLocation,
     ScenarioLocationPort,
     ScenarioPort,
@@ -269,6 +273,23 @@ class IncidentOut(IncidentIn):
     created_at: float
 
 
+class ScenarioDraftOut(BaseModel):
+    id: str
+    incident_id: str
+    status: str
+    title: str
+    category: str
+    difficulty: str
+    language: str
+    description: str
+    briefing: str
+    critical_data_points: list[CriticalDataPointModel]
+    missing_information: list[str]
+    approved_scenario_id: str
+    created_at: float
+    updated_at: float
+
+
 class GroupStatsModel(BaseModel):
     sample_size: int
     avg_outcome_rating: float | None = None
@@ -312,6 +333,11 @@ def create_app(
     # docs/designs/ubicacion-del-incidente.md: idem — sin configurar, el CRUD de ubicación
     # responde 503 y `score_session` recibe `location=None` (cero cambio de comportamiento).
     scenario_location_store: ScenarioLocationPort | None = None,
+    # ADR-0014: idem — sin configurar, `POST /incidents/{id}/draft-scenario` y las rutas de
+    # `/scenario-drafts` responden 503, cero cambio de comportamiento para instalaciones que no
+    # configuran redacción asistida.
+    scenario_draft_store: ScenarioDraftStorePort | None = None,
+    scenario_drafting: ScenarioDraftingPort | None = None,
 ) -> FastAPI:
     """Factory (no una `app` global a nivel de módulo) para que los tests puedan inyectar
     dobles de prueba de cada puerto sin compartir estado entre tests ni depender de
@@ -861,6 +887,93 @@ def create_app(
             with_video=body.video is not None,
         )
         return _scenario_out(scenario, scenario_video_store, scenario_location_store)
+
+    # -----------------------------------------------------------------
+    # Borradores de escenario asistidos por Claude — ver ADR-0014. Un borrador nunca es un
+    # `Scenario` real (no puede iniciar una llamada de entrenamiento) hasta que se aprueba
+    # explícitamente — ver `approve_scenario_draft`/`reject_scenario_draft` (Task 4).
+    # -----------------------------------------------------------------
+
+    def _require_scenario_drafting_feature() -> None:
+        if scenario_draft_store is None or scenario_drafting is None:
+            raise HTTPException(status_code=503, detail="scenario drafting is not configured on this server")
+
+    def _draft_out(draft: ScenarioDraft) -> ScenarioDraftOut:
+        return ScenarioDraftOut(
+            id=draft.id,
+            incident_id=draft.incident_id,
+            status=draft.status,
+            title=draft.title,
+            category=draft.category,
+            difficulty=draft.difficulty,
+            language=draft.language,
+            description=draft.description,
+            briefing=draft.briefing,
+            critical_data_points=[
+                CriticalDataPointModel(key=p.key, label=p.label, required=p.required, match_hints=p.match_hints)
+                for p in draft.critical_data_points
+            ],
+            missing_information=draft.missing_information,
+            approved_scenario_id=draft.approved_scenario_id,
+            created_at=draft.created_at,
+            updated_at=draft.updated_at,
+        )
+
+    @app.post("/incidents/{incident_id}/draft-scenario", response_model=ScenarioDraftOut, status_code=201)
+    def draft_scenario_from_incident(incident_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
+        """Pide a Claude un borrador completo a partir de las notas de un incidente — ADR-0014.
+        A diferencia de `promote_incident_to_scenario`, esto NO crea un `Scenario` ni marca el
+        incidente como promovido: eso solo pasa al aprobar el borrador (Task 4)."""
+
+        _require_scenario_drafting_feature()
+
+        incident = incident_store.get(incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail="incident not found")
+        if incident.promoted_scenario_id:
+            raise HTTPException(status_code=409, detail="incident was already promoted to a scenario")
+        if scenario_draft_store.get_pending_for_incident(incident_id) is not None:
+            raise HTTPException(status_code=409, detail="incident already has a pending draft")
+
+        try:
+            content = scenario_drafting.draft(incident)
+        except ScenarioDraftingError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+        draft = ScenarioDraft(
+            id="",
+            incident_id=incident_id,
+            status="pending",
+            title=content.title,
+            category=content.category,
+            difficulty=content.difficulty,
+            language=content.language,
+            description=content.description,
+            briefing=content.briefing,
+            critical_data_points=content.critical_data_points,
+            missing_information=content.missing_information,
+            raw_response=content.raw_response,
+        )
+        scenario_draft_store.create(draft)
+
+        log_event(
+            logger, "scenario_draft_created", supervisor_id=claims.supervisor_id,
+            incident_id=incident_id, draft_id=draft.id,
+        )
+        return _draft_out(draft)
+
+    @app.get("/scenario-drafts", response_model=list[ScenarioDraftOut])
+    def list_scenario_drafts(claims: SessionTokenClaims = Depends(_bearer_claims)):
+        _require_scenario_drafting_feature()
+        return [_draft_out(draft) for draft in scenario_draft_store.list()]
+
+    @app.get("/scenario-drafts/{draft_id}", response_model=ScenarioDraftOut)
+    def get_scenario_draft(draft_id: str, claims: SessionTokenClaims = Depends(_bearer_claims)):
+        _require_scenario_drafting_feature()
+        draft = scenario_draft_store.get(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="scenario draft not found")
+        return _draft_out(draft)
 
     @app.get("/impact-report", response_model=ImpactReportModel)
     def get_impact_report(claims: SessionTokenClaims = Depends(_bearer_claims)):
