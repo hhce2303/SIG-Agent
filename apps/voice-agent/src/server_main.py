@@ -39,10 +39,10 @@ Opcionales:
   desarrollo local, no un fallback silencioso indeseado.
 
 Empaquetado como ejecutable standalone (PyInstaller): ver
-docs/designs/empaquetado-ejecutable-backend.md. `base_dir()`/`bundle_dir()`
-(`core/paths.py`) anclan todo el estado escribible y los assets empaquetados al directorio del
-propio `.exe`, no al CWD desde el que se lo invoque — independiente de si arranca con doble-click,
-un acceso directo, o desde otra carpeta.
+docs/designs/empaquetado-ejecutable-backend.md. `base_dir()`/`bundle_dir()` (`core/paths.py`)
+separan estado escribible y assets empaquetados. El instalador unificado configura
+`SIG_AGENT_DATA_DIR` para guardar el estado bajo `%LOCALAPPDATA%`; el ZIP standalone conserva el
+fallback junto al `.exe`. Ninguno depende del CWD desde el que se invoque.
 """
 
 import os
@@ -147,8 +147,9 @@ def build_app():
         secret_key=os.getenv("VIDEO_TOKEN_SECRET", os.environ["SESSION_TOKEN_SECRET"]).encode(),
     )
 
-    # Premisa 6: ancladas a `base_dir()` (junto al ejecutable), no al CWD desde el que se
-    # invoque — `os.path.join` descarta `base_dir()` solo si el override ya es una ruta
+    # Premisa 6 + ADR-0013: ancladas a `base_dir()` (directorio externo del instalador o junto al
+    # ejecutable en el fallback standalone), no al CWD — `os.path.join` descarta `base_dir()` si
+    # el override ya es una ruta
     # absoluta, así que un `SESSIONS_DB_PATH` absoluto (ej. un share de red) sigue funcionando.
     # `os.getenv(key) or default`, no `os.getenv(key, default)` (Premisa 7) — una variable
     # presente pero vacía en `.env` debe caer al default, no resolver a `""`.

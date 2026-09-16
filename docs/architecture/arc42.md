@@ -233,6 +233,13 @@ múltiples PCs posibles, no sesiones simultáneas.
 | [0004](./adr/0004-topologia-de-despliegue.md) | Topología de despliegue — servidor LAN + RTX | accepted — condicionado a spike (Gate 0) |
 | [0005](./adr/0005-audio-en-vivo-vad-sin-barge-in.md) | Audio en vivo — VAD por turnos, sin barge-in | accepted |
 | [0006](./adr/0006-arquitectura-hexagonal.md) | Estilo arquitectónico — hexagonal, sin DDD táctico | accepted |
+| [0007](./adr/0007-motor-de-persistencia.md) | Motor de persistencia | accepted |
+| [0008](./adr/0008-mecanismo-de-autenticacion-de-sesion.md) | Mecanismo de autenticación de sesión | accepted |
+| [0009](./adr/0009-auth-de-streaming-de-video.md) | Autenticación de streaming de video | accepted |
+| [0010](./adr/0010-scoring-de-ground-truth-de-video.md) | Scoring de ground truth de video | accepted |
+| [0011](./adr/0011-gate-de-rol-minimo-video-de-incidentes.md) | Gate de rol mínimo para video de incidentes | accepted |
+| [0012](./adr/0012-upload-real-de-video-de-escenarios.md) | Upload real de video de escenarios | accepted |
+| [0013](./adr/0013-instalador-unificado-monomaquina.md) | Instalador Windows unificado para el perfil monomáquina actual | accepted |
 
 ## 10. Requisitos de calidad
 

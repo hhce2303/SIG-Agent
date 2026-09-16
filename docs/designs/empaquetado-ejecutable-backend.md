@@ -314,14 +314,18 @@ build real); test del fail-fast de la Premisa 7 distinguiendo ".env ausente" de 
 
 ## Distribution Plan
 
-- `uv sync` corre desde la raíz del repo (`pyproject.toml`/`uv.lock` son a nivel monorepo — no
+- `uv sync --frozen --inexact` corre desde la raíz del repo (`pyproject.toml`/`uv.lock` son a nivel monorepo — no
   existe un `pyproject.toml` anidado en `apps/voice-agent`); esto instala `pyinstaller` porque se
-  agrega como dev-dependency en el `pyproject.toml` raíz (ver Dependencies).
+  agrega como dev-dependency en el `pyproject.toml` raíz (ver Dependencies). `--inexact` evita
+  que OneDrive bloquee el build al intentar borrar paquetes ajenos del venv; las versiones del
+  lock siguen siendo la fuente de verdad por `--frozen`.
 - Build local por ahora: script (`build_exe.ps1`) en la raíz del repo cuya secuencia literal es:
-  `uv sync` (raíz) → `cd apps/voice-agent/src` → `uv run pyinstaller server_main.spec`. El
+  `uv sync --frozen --inexact` (raíz) → validar/descargar modelos →
+  `cd apps/voice-agent/src` → `uv run pyinstaller server_main.spec` → scrub → ZIP + SHA-256. El
   `.spec` versionado vive en `apps/voice-agent/src/server_main.spec` (junto al entry point, que
   es donde PyInstaller lo genera por default en la corrida exploratoria de "The Assignment") y
-  el resultado queda en `apps/voice-agent/src/dist/server_main/`. El cwd de la invocación real
+  resultado expandido queda en `apps/voice-agent/src/dist/server_main/` y la entrega en
+  `apps/voice-agent/src/dist/SIG-Agent-Backend.zip`. El cwd de la invocación real
   de PyInstaller es `apps/voice-agent/src` — el mismo supuesto que ya usa `dev-up.ps1` y que
   Dependencies exige para los imports planos del proyecto.
 - CI/CD (GitHub Actions) queda fuera de este plan salvo pedido explícito — se documenta como
@@ -374,7 +378,7 @@ SmartScreen contra un binario sin firmar (ver Open Questions). Ese hallazgo (hid
 necesarios) se registra como comentarios directamente en el `.spec` versionado del repo, no en
 un documento aparte — el `.spec` es la fuente de verdad del build de ahí en adelante.
 
-**Ya corrido de verdad (no solo planeado) — 3 hallazgos reales, ninguno adivinado de antemano:**
+**Ya corrido de verdad (no solo planeado) — 5 hallazgos reales, ninguno adivinado de antemano:**
 1. `WinError 206` ("filename or extension is too long") en el paso `COLLECT`: los textos de
    licencia de `torch-*.dist-info/licenses/third_party/kineto/.../DCGM/...` están tan anidados
    que revientan el límite de 260 caracteres de Windows en cuanto el repo vive bajo una ruta
@@ -391,18 +395,22 @@ un documento aparte — el `.spec` es la fuente de verdad del build de ahí en a
    Open Question de espeak-ng de abajo**: no hace falta instalar un binario nativo `espeak-ng`
    por separado en la máquina destino — `espeakng_loader` ya es una dependencia de pip que trae
    los datos necesarios, alcanza con `--collect-all espeakng_loader`.
+4. Kokoro/Misaki requiere el modelo spaCy `en_core_web_sm`. Sin empaquetarlo, el `.exe` intenta
+   descargarlo desde `raw.githubusercontent.com` al arrancar y falla offline. Se agregó como
+   dependencia directa y reproducible en `pyproject.toml`/`uv.lock`; el `.spec` colecta tanto el
+   paquete como su metadata de distribución, porque `spacy.util.is_package()` consulta esa
+   metadata antes de decidir si descarga.
+5. Misaki carga léxicos G2P con `importlib.resources` (`misaki/data/us_gold.json`, entre otros).
+   Son datos de una dependencia transitiva, no imports Python, así que se agregaron con
+   `collect_data_files("misaki")`.
 
-Con los tres fixes aplicados, el `.exe` compilado arrancó de verdad en esta máquina (sin destino
-limpio todavía — eso sigue pendiente) y: cargó torch/kokoro/faster-whisper/ctranslate2/
-onnxruntime/sounddevice/soundfile sin errores de import, resolvió `base_dir()` correctamente al
-directorio del propio `.exe` (confirmado por el mensaje de error mostrando la ruta correcta),
-falló con el mensaje claro de Premisa 7 cuando faltaban los secretos requeridos (exit code 1,
-confirmado), y con un `.env` de prueba + modelos placeholder, `_require_paths` encontró
-correctamente los archivos vía `bundle_dir()` y se los pasó a `WhisperModel`/`KModel` (que
-rechazaron el contenido placeholder con un error de CTranslate2 sobre versión de binario — la
-ruta se resolvió bien, el contenido fake no). Falta correr `scripts/fetch_models.py` con pesos
-reales y repetir el smoke test STT/TTS de Success Criteria en una máquina limpia — eso sigue sin
-hacerse.
+Con los cinco fixes aplicados, el `.exe` final cargó Whisper + Kokoro desde
+`_internal/models`, arrancó desde `%TEMP%` (CWD distinto al del `.exe`) sin intentar descargas y
+respondió `200 {"status":"ok"}` en `/health`. También falló con el mensaje claro de Premisa 7
+cuando faltaban los secretos requeridos (exit code 1, confirmado). El smoke test de inferencia
+STT→TTS con audio real y la prueba en una máquina Windows limpia siguen pendientes: el health
+check confirma bundling/carga de modelos e independencia del CWD, no calidad de inferencia ni el
+comportamiento de SmartScreen.
 
 ## What I noticed about how you think
 

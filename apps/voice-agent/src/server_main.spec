@@ -30,7 +30,7 @@ Luego editar el `Analysis(...)` generado para agregar el `datas` de `models/` de
 no lo agrega solo) y confirmar `console=True`.
 """
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files, copy_metadata
 
 COLLECT_ALL_PACKAGES = [
     "faster_whisper",
@@ -59,6 +59,12 @@ COLLECT_ALL_PACKAGES = [
     # instalado por separado en la máquina destino -- `espeakng_loader` ya es una dependencia de
     # pip que trae los datos necesarios, alcanza con `--collect-all`.
     "espeakng_loader",
+    # Hallazgo del smoke test offline del ejecutable: Misaki/Kokoro comprueba este modelo con
+    # `spacy.util.is_package()` y, si no esta empaquetado, intenta descargarlo desde GitHub al
+    # arrancar. Eso rompe el requisito de cero descargas en la maquina destino. Se colectan el
+    # paquete de datos y su metadata de distribucion (esta ultima es lo que consulta
+    # `is_package()`), ambos necesarios; incluir solo `spacy` no incluye sus modelos.
+    "en_core_web_sm",
 ]
 
 datas = []
@@ -69,6 +75,15 @@ for _pkg in COLLECT_ALL_PACKAGES:
     datas += _datas
     binaries += _binaries
     hiddenimports += _hiddenimports
+
+# `collect_all()` no garantiza la metadata que usa `spacy.util.is_package('en_core_web_sm')`.
+# Sin ella, el paquete puede estar fisicamente en `_internal/` y aun asi Misaki intenta bajarlo.
+datas += copy_metadata("en-core-web-sm")
+
+# Segundo hallazgo del smoke test offline: Misaki carga sus lexicos G2P con
+# `importlib.resources` (`misaki/data/us_gold.json`, entre otros). Son datos del paquete
+# transitivo, no imports Python, y `collect_all('kokoro')` no los arrastra.
+datas += collect_data_files("misaki")
 
 # Premisa 4: pesos de modelo (producidos por scripts/fetch_models.py, corrido ANTES de este
 # build) — relativo a este .spec (apps/voice-agent/src/), models/ vive en la raíz del repo, tres

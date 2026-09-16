@@ -19,6 +19,20 @@ def test_base_dir_resolves_to_src_root_when_not_frozen():
     assert paths.base_dir() == expected
 
 
+def test_base_dir_uses_explicit_data_dir_when_configured(monkeypatch, tmp_path):
+    data_dir = tmp_path / "SIG Agent" / "data"
+    monkeypatch.setenv("SIG_AGENT_DATA_DIR", str(data_dir))
+
+    assert paths.base_dir() == str(data_dir.resolve())
+
+
+def test_empty_data_dir_keeps_legacy_resolution(monkeypatch):
+    monkeypatch.setenv("SIG_AGENT_DATA_DIR", "")
+    expected = os.path.dirname(os.path.dirname(os.path.abspath(paths.__file__)))
+
+    assert paths.base_dir() == expected
+
+
 def test_bundle_dir_resolves_to_src_root_when_not_frozen_and_no_meipass():
     expected = os.path.dirname(os.path.dirname(os.path.abspath(paths.__file__)))
 
@@ -38,6 +52,15 @@ def test_bundle_dir_resolves_to_meipass_when_set_regardless_of_frozen(monkeypatc
     monkeypatch.setattr(sys, "_MEIPASS", os.path.join("C:", "dist", "server_main", "_internal"), raising=False)
 
     assert paths.bundle_dir() == os.path.join("C:", "dist", "server_main", "_internal")
+
+
+def test_data_dir_override_does_not_move_bundled_models(monkeypatch, tmp_path):
+    internal_dir = os.path.join("C:", "Program Files", "SIG Agent", "resources", "backend", "_internal")
+    monkeypatch.setenv("SIG_AGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(sys, "_MEIPASS", internal_dir, raising=False)
+
+    assert paths.base_dir() == str((tmp_path / "data").resolve())
+    assert paths.bundle_dir() == internal_dir
 
 
 def test_base_dir_and_bundle_dir_differ_under_onedir_layout(monkeypatch):

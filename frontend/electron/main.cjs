@@ -1,6 +1,27 @@
 const { app, BrowserWindow } = require('electron')
 const { autoUpdater } = require('electron-updater')
+const fs = require('fs')
 const path = require('path')
+const { backendDataDir, startBackend, stopBackend } = require('./backend-process.cjs')
+
+let quitting = false
+const packagedSmokeTest = process.env.SIG_AGENT_PACKAGED_SMOKE_TEST === '1'
+
+function writeSmokeDiagnostic(stage, details = {}) {
+  if (!packagedSmokeTest) return
+  const dataDir = backendDataDir()
+  fs.mkdirSync(dataDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dataDir, 'packaged-smoke.json'),
+    JSON.stringify({ stage, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, ...details }),
+  )
+}
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+writeSmokeDiagnostic('main-loaded', { hasSingleInstanceLock })
+if (!hasSingleInstanceLock) {
+  app.quit()
+}
 
 // Fase 3 (roadmap): "auto-update del cliente Electron" — sin esto, actualizar cada PC de
 // supervisor requiere ir máquina por máquina en persona. `electron-builder`'s `publish` config
@@ -66,12 +87,54 @@ app.on('certificate-error', (event, _webContents, _url, _error, _certificate, ca
   callback(true)
 })
 
-app.whenReady().then(() => {
-  createWindow()
-  initAutoUpdate()
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
+app.whenReady().then(async () => {
+  try {
+    writeSmokeDiagnostic('starting-backend', { hasSingleInstanceLock })
+    const ready = await startBackend()
+    if (!ready) {
+      app.quit()
+      return
+    }
+    // Smoke test del artefacto real: valida resolución de resources/backend, spawn, health y
+    // shutdown sin abrir UI. Solo se activa explícitamente en la máquina de build; nunca forma
+    // parte del flujo normal ni evita la validación manual de audio en una máquina limpia.
+    if (packagedSmokeTest) {
+      await stopBackend()
+      writeSmokeDiagnostic('complete', { hasSingleInstanceLock })
+      quitting = true
+      app.quit()
+      return
+    }
+    createWindow()
+    initAutoUpdate()
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  } catch (error) {
+    console.error('[backend] startup failed', error)
+    const dataDir = backendDataDir()
+    await require('electron').dialog.showMessageBox({
+      type: 'error',
+      title: 'SIG Agent no pudo iniciar',
+      message: 'El backend no pudo iniciar.',
+      detail: `${error.message}\n\nRevise: ${path.join(dataDir, 'logs', 'server.log')}`,
+    })
+    app.quit()
+  }
+})
+
+app.on('second-instance', () => {
+  const window = BrowserWindow.getAllWindows()[0]
+  if (!window) return
+  if (window.isMinimized()) window.restore()
+  window.focus()
+})
+
+app.on('before-quit', (event) => {
+  if (quitting) return
+  quitting = true
+  event.preventDefault()
+  stopBackend().finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

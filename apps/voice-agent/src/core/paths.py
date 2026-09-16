@@ -5,10 +5,10 @@ Dos categorías de rutas, dos helpers — nunca la misma función para ambas, es
 (conflacionar ambos directorios) fue un hallazgo real de la revisión de ingeniería, no una
 preocupación teórica:
 
-- `base_dir()`: estado ESCRIBIBLE anclado junto al ejecutable (`.env`, `sessions.db`, `logs/`,
-  certificados TLS, `video_storage/`). Bajo PyInstaller `--onedir` el `.exe` vive en
-  `dist/<name>/`, junto a `_internal/` — `base_dir()` resuelve a ESE directorio (el que
-  contiene `_internal/`), no a `_internal/` en sí.
+- `base_dir()`: estado ESCRIBIBLE. Si `SIG_AGENT_DATA_DIR` está configurada, resuelve a ese
+  directorio externo (perfil del instalador unificado); de lo contrario se mantiene anclado
+  junto al ejecutable (`.env`, `sessions.db`, `logs/`, certificados TLS, `video_storage/`).
+  Bajo PyInstaller `--onedir` el `.exe` vive en `dist/<name>/`, junto a `_internal/`.
 - `bundle_dir()`: assets de SOLO LECTURA empaquetados vía `datas=[]` (pesos de modelo).
   PyInstaller coloca esos archivos dentro de `_internal/` (o del directorio de descompresión
   temporal en modo onefile) y expone esa ruta en tiempo de ejecución como `sys._MEIPASS`.
@@ -30,7 +30,10 @@ def _dev_root() -> str:
 
 
 def base_dir() -> str:
-    """Directorio de estado escribible: junto al `.exe` en modo frozen, `src/` en desarrollo."""
+    """Directorio de estado escribible, con override explícito para el instalador unificado."""
+    configured_data_dir = os.getenv("SIG_AGENT_DATA_DIR")
+    if configured_data_dir:
+        return os.path.abspath(os.path.expandvars(os.path.expanduser(configured_data_dir)))
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return _dev_root()

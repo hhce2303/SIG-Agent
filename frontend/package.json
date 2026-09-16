@@ -2,6 +2,8 @@
   "name": "@sig-agent/frontend",
   "private": true,
   "version": "0.1.0",
+  "description": "Desktop client for the SIG Agent police-call training simulator",
+  "author": "SIG Systems, Inc.",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -9,6 +11,7 @@
     "dev:renderer": "vite --host 127.0.0.1",
     "dev:electron": "wait-on http://127.0.0.1:5180 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5180 electron .",
     "build": "tsc --noEmit && vite build",
+    "test:electron": "node --test test/*.test.cjs",
     "preview": "vite preview",
     "start": "electron .",
     "dist:win": "npm run build && electron-builder --win nsis",
@@ -48,8 +51,19 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "../apps/voice-agent/src/dist/server_main",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          ".env.example"
+        ]
+      }
+    ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "signAndEditExecutable": false
     },
     "publish": {
       "provider": "github",

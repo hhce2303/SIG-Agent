@@ -15,8 +15,9 @@
          `dist/server_main/` — el smoke test local genera esos archivos, y si la carpeta se
          zippea tal cual para TODOS los concesionarios, cada uno terminaría compartiendo la
          MISMA clave privada TLS.
-      5. Rollback: si ya existe un build anterior en `dist/`, se renombra a `dist.previous/`
-         antes de reemplazarlo — nunca se borra hasta confirmar que el build nuevo funciona.
+      5. Copia la plantilla `.env.example`, crea `dist/SIG-Agent-Backend.zip` y escribe su
+         checksum SHA-256. Rollback: si ya existe un build anterior, se conserva como
+         `dist/server_main.previous/` antes de reemplazarlo.
 
 .PARAMETER RefetchModels
     Fuerza volver a descargar los pesos de modelo aunque `models/` ya exista (ej. cambiaste
@@ -27,15 +28,22 @@
     para debug local cuando querés inspeccionar el `.env`/certificado generados por el smoke
     test.
 
+.PARAMETER SkipArchive
+    Salta la creacion del ZIP y su checksum SHA-256. Util para iteraciones locales; una entrega
+    normal debe conservar el valor por defecto y distribuir el ZIP completo, no solo el .exe.
+
 .EXAMPLE
     ./build_exe.ps1
 .EXAMPLE
     ./build_exe.ps1 -RefetchModels
+.EXAMPLE
+    ./build_exe.ps1 -SkipArchive
 #>
 
 param(
     [switch]$RefetchModels,
-    [switch]$SkipScrub
+    [switch]$SkipScrub,
+    [switch]$SkipArchive
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,7 +52,9 @@ $RepoRoot = $PSScriptRoot
 $BackendSrc = Join-Path $RepoRoot 'apps\voice-agent\src'
 $ModelsDir = Join-Path $RepoRoot 'models'
 $DistDir = Join-Path $BackendSrc 'dist\server_main'
-$PreviousDistDir = Join-Path $BackendSrc 'dist.previous\server_main'
+$PreviousDistDir = Join-Path $BackendSrc 'dist\server_main.previous'
+$ArchivePath = Join-Path $BackendSrc 'dist\SIG-Agent-Backend.zip'
+$ArchiveHashPath = "$ArchivePath.sha256"
 $WhisperModelDir = Join-Path $ModelsDir 'whisper'
 $KokoroModelDir = Join-Path $ModelsDir 'kokoro'
 $KokoroVoice = if ($env:KOKORO_VOICE) { $env:KOKORO_VOICE } else { 'am_michael' }
@@ -56,7 +66,11 @@ $RequiredModelFiles = @(
     (Join-Path $KokoroModelDir "voices\$KokoroVoice.pt")
 )
 
-Write-Host "=== 1/4: uv sync (raiz del repo) ===" -ForegroundColor Cyan
+if ($SkipScrub -and -not $SkipArchive) {
+    throw "-SkipScrub exige -SkipArchive para impedir que secretos o estado entren al ZIP de distribucion."
+}
+
+Write-Host "=== 1/5: uv sync (raiz del repo) ===" -ForegroundColor Cyan
 Push-Location $RepoRoot
 try {
     # --frozen hace que uv.lock sea la fuente de verdad. --inexact evita que el build falle
@@ -68,7 +82,7 @@ try {
     Pop-Location
 }
 
-Write-Host "=== 2/4: fetch_models.py ===" -ForegroundColor Cyan
+Write-Host "=== 2/5: fetch_models.py ===" -ForegroundColor Cyan
 $MissingModelFiles = @($RequiredModelFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
 if (($MissingModelFiles.Count -eq 0) -and -not $RefetchModels) {
     Write-Host "Los pesos requeridos ya existen; se salta la descarga (usa -RefetchModels para forzarla)."
@@ -90,7 +104,7 @@ if ($MissingModelFiles.Count -gt 0) {
     throw "La descarga termino incompleta. Faltan: $($MissingModelFiles -join ', ')"
 }
 
-Write-Host "=== 3/4: pyinstaller server_main.spec ===" -ForegroundColor Cyan
+Write-Host "=== 3/5: pyinstaller server_main.spec ===" -ForegroundColor Cyan
 # Rollback: preservar el build anterior ANTES de que pyinstaller lo sobreescriba — mismo paso
 # que preservar sessions.db/video_storage/cert en un redeploy real (Open Questions del design
 # doc), acá aplicado al propio build.
@@ -113,7 +127,7 @@ if (-not (Test-Path (Join-Path $DistDir 'server_main.exe'))) {
     throw "El build termino pero no se encontro $DistDir\server_main.exe; revisar el log de pyinstaller arriba."
 }
 
-Write-Host "=== 4/4: scrub de secretos/estado antes de distribuir ===" -ForegroundColor Cyan
+Write-Host "=== 4/5: scrub de secretos/estado antes de distribuir ===" -ForegroundColor Cyan
 if ($SkipScrub) {
     Write-Host "SALTEADO (-SkipScrub): NO zippear esta carpeta para un concesionario real; contiene secretos/estado del smoke test local." -ForegroundColor Yellow
 } else {
@@ -129,11 +143,30 @@ if ($SkipScrub) {
     Write-Host "Scrub completo: $DistDir esta lista para zippear y distribuir." -ForegroundColor Green
 }
 
+# La plantilla no contiene secretos. Se entrega junto al binario para que IT solo tenga que
+# copiarla como `.env` y completar los cuatro valores requeridos; las rutas de modelos ya
+# coinciden con el layout `_internal/models` que resuelve `bundle_dir()`.
+Copy-Item -LiteralPath (Join-Path $RepoRoot 'apps\voice-agent\backend.env.example') `
+    -Destination (Join-Path $DistDir '.env.example') -Force
+
+Write-Host "=== 5/5: archivo de distribucion ===" -ForegroundColor Cyan
+if ($SkipArchive) {
+    Write-Host "SALTEADO (-SkipArchive). La carpeta completa $DistDir sigue siendo el artefacto; no distribuir solo el .exe." -ForegroundColor Yellow
+} else {
+    if (Test-Path -LiteralPath $ArchivePath) { Remove-Item -LiteralPath $ArchivePath -Force }
+    if (Test-Path -LiteralPath $ArchiveHashPath) { Remove-Item -LiteralPath $ArchiveHashPath -Force }
+    Compress-Archive -LiteralPath $DistDir -DestinationPath $ArchivePath -CompressionLevel Optimal
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash
+    [System.IO.File]::WriteAllText($ArchiveHashPath, "$hash  $(Split-Path $ArchivePath -Leaf)`r`n")
+    Write-Host "ZIP: $ArchivePath" -ForegroundColor Green
+    Write-Host "SHA-256: $hash"
+}
+
 Write-Host ""
 Write-Host "=== Listo ===" -ForegroundColor Cyan
 Write-Host "Ejecutable: $DistDir\server_main.exe"
-Write-Host "Antes de distribuir a un concesionario NUEVO: copiar un .env real (con los secretos"
-Write-Host "reales) a esa carpeta; el .env del smoke test fue borrado a proposito arriba."
+Write-Host "Antes de distribuir a un concesionario NUEVO: copiar .env.example como .env y"
+Write-Host "completar sus secretos; ningun secreto queda dentro del ZIP."
 Write-Host ""
 Write-Host "Antes de REDISTRIBUIR una actualizacion a un concesionario EXISTENTE: preservar"
 Write-Host "sessions.db / video_storage/ / server.crt / server.key / .env del despliegue actual"

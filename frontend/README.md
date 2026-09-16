@@ -1,8 +1,8 @@
 # SIG Agent Frontend
 
-Aplicación de escritorio de SIG Agent construida con Electron, React,
-TypeScript y Vite. Esta carpeta es un proyecto frontend independiente: no
-contiene Python, claves de proveedores de IA ni inicia procesos del backend.
+Aplicación de escritorio de SIG Agent construida con Electron, React, TypeScript y Vite. El
+instalador empaquetado incluye e inicia el backend PyInstaller; el modo desarrollo continúa
+ejecutándolo por separado. Las claves nunca entran al bundle frontend.
 
 ## Requisitos
 
@@ -19,7 +19,7 @@ npm install
 npm run dev
 ```
 
-La aplicación intenta conectarse a `ws://127.0.0.1:8765` de forma
+La aplicación intenta conectarse a `wss://127.0.0.1:8000` de forma
 predeterminada. Para usar otro entorno, modifica únicamente:
 
 ```dotenv
@@ -41,6 +41,10 @@ npm run release:win # instalador de Windows + publica el release en GitHub (requ
 
 `npm run dev` inicia solamente el frontend. El equipo de backend debe ejecutar
 su servicio por separado.
+
+El build unificado recomendado se ejecuta desde la raíz con `build_release.ps1`. En el primer
+arranque crea `%LOCALAPPDATA%\SIG Agent\data\.env`, abre el archivo si faltan valores y no inicia
+el backend hasta que estén configuradas las cuatro variables obligatorias.
 
 ## Auto-update (Fase 3)
 

@@ -10,8 +10,8 @@ documento enlazado, el documento enlazado gana.
    quién, y qué objetivos de calidad priorizan sobre cuáles.
 2. [`docs/architecture/glossary.md`](./docs/architecture/glossary.md) — vocabulario de dominio.
    Usar estos términos exactamente, no sinónimos.
-3. [`docs/architecture/adr/`](./docs/architecture/adr/) — las 6 decisiones estructurales
-   vigentes (ADR-0001 a ADR-0006), en orden.
+3. [`docs/architecture/adr/`](./docs/architecture/adr/) — las decisiones estructurales
+   vigentes (ADR-0001 en adelante), en orden.
 4. [`docs/architecture/nfr.md`](./docs/architecture/nfr.md) — requisitos de calidad con ID
    estable, referenciados desde los ADRs y desde este archivo.
 5. [`docs/architecture/TODOS.md`](./docs/architecture/TODOS.md) — decisiones pendientes y

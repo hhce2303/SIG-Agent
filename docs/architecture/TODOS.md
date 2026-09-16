@@ -371,7 +371,7 @@ que nadie lo note.
 
 ### TODO-21
 **Empaquetado del frontend (Electron/Vite) como compañero del backend empaquetado.** Estado:
-PENDING. Sin dueño nombrado.
+**[RESOLVED 2026-08-28]**.
 
 `frontend/BACKEND_REQUIREMENTS.md` §2 exige que el backend corra en la misma máquina que tiene
 micrófono y parlantes — confirmado en código (`tts/kokoro.py::KokoroTTS.speak()` usa
@@ -383,6 +383,23 @@ que saber activar un venv" que ese plan resuelve para el backend, solo movido al
 TODO existe para que "empaquetar el backend" no se lea como "listo para desplegar en un
 concesionario" sin más trabajo. Toolchain distinto (Node/electron-builder, no PyInstaller/uv) —
 plan separado, no una extensión del de backend.
+
+**Actualización 2026-08-28:** el cliente ya se empaqueta como instalador NSIS mediante
+`frontend/package.json::scripts.dist:win` y se generó/verificó el artefacto real
+`frontend/release/SIG Agent Setup 0.1.0.exe`. En esta máquina fue necesario fijar
+`build.win.signAndEditExecutable=false`: no existe certificado de code-signing y la herramienta
+auxiliar de edición de ejecutables de `electron-builder` contiene symlinks de macOS que Windows
+no permite extraer sin un privilegio adicional. No cambia la brecha conocida de SmartScreen:
+el instalador sigue sin firma y Windows puede mostrar una advertencia. Backend y frontend se
+entregan como dos artefactos compañeros; ambos corren hoy en la misma máquina por el boundary de
+audio documentado en `frontend/BACKEND_REQUIREMENTS.md` §2. Runbook:
+[`docs/deployment/windows-release.md`](../deployment/windows-release.md).
+
+**Actualización 2026-08-28 (instalador unificado):** ADR-0013 reemplaza la entrega normal de dos
+artefactos por un solo NSIS que incluye el backend completo. Electron gestiona el arranque y
+health check; `%LOCALAPPDATA%\SIG Agent\data` preserva `.env`, SQLite, certificados, logs y
+videos fuera de los binarios actualizables. El ZIP separado se conserva como fallback de
+soporte, no como paso obligatorio para el usuario final.
 
 ### TODO-22
 **Validar con quien pidió el ejecutable si un binario compilado es un requisito literal.**
